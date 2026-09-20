@@ -93,6 +93,12 @@ class ApplicationAPITests(unittest.TestCase):
         response = self.api.handle(Request("GET", "/v1/admin/tokens", user_id="user-1"))
         self.assertEqual(response.status, 404)
 
+    def test_health_is_public_and_reports_version(self):
+        response = self.api.handle(Request("GET", "/health"))
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body["status"], "ok")
+        self.assertEqual(response.body["service"], "astratrade-ai")
+
 
 if __name__ == "__main__":
     unittest.main()

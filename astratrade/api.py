@@ -37,8 +37,10 @@ class ApplicationAPI:
         oauth: OAuthService,
         callback_redirect_uri: str,
         allowed_redirect_uris: FrozenSet[str] | None = None,
+        version: str = "dev",
     ):
         self.oauth = oauth
+        self.version = version
         self.callback_redirect_uri = callback_redirect_uri
         self.allowed_redirect_uris = allowed_redirect_uris or frozenset(
             {callback_redirect_uri}
@@ -59,6 +61,11 @@ class ApplicationAPI:
         body = dict(request.body or {})
 
         try:
+            if method == "GET" and path == "/health":
+                return Response(
+                    200,
+                    {"status": "ok", "service": "astratrade-ai", "version": self.version},
+                )
             if method == "POST" and path == "/v1/oauth/start":
                 return self._start(request.user_id, body)
             if method == "GET" and path == "/v1/oauth/callback":
