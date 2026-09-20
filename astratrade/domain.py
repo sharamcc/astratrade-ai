@@ -25,6 +25,22 @@ class AgentStatus(str, Enum):
     FAILED = "failed"
 
 
+@dataclass(frozen=True)
+class User:
+    user_id: str
+    email: str
+    status: str = "active"
+    risk_confirmed: bool = False
+
+
+@dataclass(frozen=True)
+class Strategy:
+    strategy_id: str
+    version: str
+    status: str
+    allowed_instruments: FrozenSet[str]
+
+
 class OrderState(str, Enum):
     INTENT = "intent"
     RISK_APPROVED = "risk_approved"

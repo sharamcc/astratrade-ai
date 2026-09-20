@@ -9,6 +9,8 @@ from .domain import (
     RiskDecision,
     RiskProfile,
     Signal,
+    Strategy,
+    User,
 )
 from .risk import evaluate_signal
 
@@ -21,5 +23,7 @@ __all__ = [
     "RiskDecision",
     "RiskProfile",
     "Signal",
+    "Strategy",
+    "User",
     "evaluate_signal",
 ]
