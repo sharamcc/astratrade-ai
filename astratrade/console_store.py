@@ -642,7 +642,13 @@ class ConsoleStore:
         for equity in snapshots:
             peak = max(peak, equity)
             max_drawdown = max(max_drawdown, peak - equity)
-        return {"strategy_id": strategy_id, "run_count": runs["total"], "filled_run_count": runs["filled"] or 0, "risk_blocked_run_count": runs["blocked"] or 0, "signal_count": signals["total"], "filled_signal_count": signals["filled"] or 0, "risk_blocked_signal_count": signals["blocked"] or 0, "fees_usdt": f"{Decimal(str(fees)):.8f}", "equity_start_usdt": str(snapshots[0]) if snapshots else None, "equity_current_usdt": str(snapshots[-1]) if snapshots else None, "pnl_usdt": str(snapshots[-1] - snapshots[0]) if len(snapshots) > 1 else "0", "max_drawdown_usdt": str(max_drawdown), "simulation": True}
+        positions: list[dict[str, Any]] = []
+        for position in self.connection.execute("SELECT instrument, quantity FROM sim_positions WHERE user_id=? AND quantity <> '0' ORDER BY instrument", (user_id,)).fetchall():
+            latest = self.connection.execute("SELECT price, observed_at FROM market_snapshots WHERE user_id=? AND instrument=? AND valid=1 ORDER BY observed_at DESC LIMIT 1", (user_id, position["instrument"])).fetchone()
+            quantity = Decimal(position["quantity"])
+            market_price = Decimal(latest["price"]) if latest else None
+            positions.append({"instrument": position["instrument"], "quantity": str(quantity), "price": str(market_price) if market_price is not None else None, "value_usdt": str(quantity * market_price) if market_price is not None else None, "price_observed_at": latest["observed_at"] if latest else None})
+        return {"strategy_id": strategy_id, "run_count": runs["total"], "filled_run_count": runs["filled"] or 0, "risk_blocked_run_count": runs["blocked"] or 0, "signal_count": signals["total"], "filled_signal_count": signals["filled"] or 0, "risk_blocked_signal_count": signals["blocked"] or 0, "fees_usdt": f"{Decimal(str(fees)):.8f}", "equity_start_usdt": str(snapshots[0]) if snapshots else None, "equity_current_usdt": str(snapshots[-1]) if snapshots else None, "pnl_usdt": str(snapshots[-1] - snapshots[0]) if len(snapshots) > 1 else "0", "max_drawdown_usdt": str(max_drawdown), "positions": positions, "simulation": True}
 
     def export_strategy_csv(self, user_id: str, strategy_id: Optional[str] = None) -> tuple[str, str]:
         where = "WHERE user_id=?" if not strategy_id else "WHERE user_id=? AND strategy_id=?"
@@ -683,10 +689,13 @@ class ConsoleStore:
         cooldown_hours = Decimal(str(strategy["config"].get("cooldown_hours", 0) or 0))
         last_run = parse(strategy.get("last_run_at"))
         cooldown_active = bool(last_run and cooldown_hours > 0 and now() < last_run + timedelta(hours=float(cooldown_hours)))
-        snapshot_id = f"market:{user_id}:{strategy_id}:{strategy['current_version']}:{observed}"
         created = iso(now())
-        self.connection.execute("INSERT OR IGNORE INTO market_snapshots(snapshot_id,user_id,instrument,price,observed_at,source,expires_at,valid,created_at) VALUES (?,?,?,?,?,?,?,?,?)", (snapshot_id, user_id, "BTC-USDT", str(price), observed, "public_okx", iso(parse(observed) + timedelta(minutes=5)) if parse(observed) else None, 1 if price > 0 else 0, created))
-        context = StrategyContext(user_id, strategy_id, strategy["current_version"], MarketSnapshot("BTC-USDT", price, observed, snapshot_id), price_history, previous_price, allocations, cooldown_active)
+        snapshot_ids: dict[str, str] = {}
+        for instrument, instrument_price in instrument_prices.items():
+            snapshot_id = f"market:{user_id}:{strategy_id}:{strategy['current_version']}:{observed}:{instrument}"
+            snapshot_ids[instrument] = snapshot_id
+            self.connection.execute("INSERT OR IGNORE INTO market_snapshots(snapshot_id,user_id,instrument,price,observed_at,source,expires_at,valid,created_at) VALUES (?,?,?,?,?,?,?,?,?)", (snapshot_id, user_id, instrument, str(instrument_price), observed, "public_okx", iso(parse(observed) + timedelta(minutes=5)) if parse(observed) else None, 1 if instrument_price > 0 else 0, created))
+        context = StrategyContext(user_id, strategy_id, strategy["current_version"], MarketSnapshot("BTC-USDT", price, observed, snapshot_ids["BTC-USDT"]), price_history, previous_price, allocations, cooldown_active)
         signals = implementation.evaluate(context)
         started = iso(now())
         interval = timedelta(days=7 if strategy["config"].get("frequency") == "weekly" else 1)
@@ -696,6 +705,8 @@ class ConsoleStore:
                 return {"status": "duplicate", "execution_key": execution_key}
             results: list[dict[str, Any]] = []
             for signal in signals:
+                from dataclasses import replace
+                signal = replace(signal, market_snapshot_id=snapshot_ids.get(signal.instrument, snapshot_ids["BTC-USDT"]))
                 signal_status = "skipped"
                 result: dict[str, Any] = {"signal_id": signal.signal_id, "action": signal.action, "reason": signal.reason, "status": signal_status}
                 self.connection.execute("INSERT INTO strategy_signals VALUES (?,?,?,?,?,?,?,?,?,?,?)", (signal.signal_id, strategy_id, user_id, signal.strategy_version, signal.instrument, signal.action, str(signal.requested_notional), signal.reason, signal.market_snapshot_id, signal_status, started))
