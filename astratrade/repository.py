@@ -14,6 +14,8 @@ from decimal import Decimal
 from typing import Optional
 
 from .domain import (
+    ConnectionStatus,
+    OAuthConnection,
     OrderIntent,
     OrderRecord,
     OrderState,
@@ -113,6 +115,25 @@ class Repository:
                 subject_id TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 occurred_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS oauth_states (
+                state TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id),
+                redirect_uri TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS exchange_connections (
+                connection_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id),
+                provider TEXT NOT NULL,
+                status TEXT NOT NULL,
+                encrypted_access_token TEXT NOT NULL,
+                encrypted_refresh_token TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             """
         )
@@ -323,3 +344,107 @@ class Repository:
             "SELECT COUNT(*) AS count FROM audit_events WHERE subject_id = ?", (subject_id,)
         ).fetchone()
         return int(row["count"])
+
+    def save_oauth_state(
+        self, state: str, user_id: str, redirect_uri: str, expires_at: datetime
+    ) -> None:
+        if self.get_user(user_id) is None:
+            raise ValueError("unknown user")
+        self.connection.execute(
+            """
+            INSERT INTO oauth_states(state, user_id, redirect_uri, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (state, user_id, redirect_uri, expires_at.isoformat(), _now()),
+        )
+        self.connection.commit()
+
+    def consume_oauth_state(
+        self, state: str, now: Optional[datetime] = None
+    ) -> Optional[tuple[str, str]]:
+        """Return the pending user/redirect exactly once, if still valid."""
+        row = self.connection.execute(
+            "SELECT user_id, redirect_uri, expires_at FROM oauth_states WHERE state = ?",
+            (state,),
+        ).fetchone()
+        self.connection.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
+        self.connection.commit()
+        if row is None:
+            return None
+        current = now or datetime.now(timezone.utc)
+        if current > _dt(row["expires_at"]):
+            return None
+        return row["user_id"], row["redirect_uri"]
+
+    def save_exchange_connection(self, connection: OAuthConnection) -> None:
+        now = _now()
+        self.connection.execute(
+            """
+            INSERT INTO exchange_connections(
+              connection_id, user_id, provider, status, encrypted_access_token,
+              encrypted_refresh_token, expires_at, scopes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(connection_id) DO UPDATE SET
+              user_id=excluded.user_id,
+              provider=excluded.provider,
+              status=excluded.status,
+              encrypted_access_token=excluded.encrypted_access_token,
+              encrypted_refresh_token=excluded.encrypted_refresh_token,
+              expires_at=excluded.expires_at,
+              scopes=excluded.scopes,
+              updated_at=excluded.updated_at
+            """,
+            (
+                connection.connection_id,
+                connection.user_id,
+                connection.provider,
+                connection.status.value,
+                connection.encrypted_access_token,
+                connection.encrypted_refresh_token,
+                connection.expires_at.isoformat(),
+                json.dumps(sorted(connection.scopes)),
+                now,
+                now,
+            ),
+        )
+        self.connection.commit()
+
+    def get_exchange_connection(self, user_id: str) -> Optional[OAuthConnection]:
+        row = self.connection.execute(
+            """
+            SELECT * FROM exchange_connections
+            WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1
+            """,
+            (user_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return OAuthConnection(
+            connection_id=row["connection_id"],
+            user_id=row["user_id"],
+            provider=row["provider"],
+            status=ConnectionStatus(row["status"]),
+            encrypted_access_token=row["encrypted_access_token"],
+            encrypted_refresh_token=row["encrypted_refresh_token"],
+            expires_at=_dt(row["expires_at"]),
+            scopes=frozenset(json.loads(row["scopes"])),
+        )
+
+    def set_connection_status(self, user_id: str, status: ConnectionStatus) -> None:
+        self.connection.execute(
+            "UPDATE exchange_connections SET status = ?, updated_at = ? WHERE user_id = ?",
+            (status.value, _now(), user_id),
+        )
+        self.connection.commit()
+
+    def get_usable_exchange_connection(
+        self, user_id: str, now: Optional[datetime] = None
+    ) -> Optional[OAuthConnection]:
+        connection = self.get_exchange_connection(user_id)
+        if connection is None or connection.status != ConnectionStatus.ACTIVE:
+            return None
+        current = now or datetime.now(timezone.utc)
+        if current >= connection.expires_at:
+            self.set_connection_status(user_id, ConnectionStatus.EXPIRED)
+            return None
+        return connection

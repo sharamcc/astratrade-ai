@@ -41,6 +41,34 @@ class Strategy:
     allowed_instruments: FrozenSet[str]
 
 
+class ConnectionStatus(str, Enum):
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    REVOKED = "revoked"
+
+
+@dataclass(frozen=True)
+class OAuthTokenSet:
+    """Short-lived provider response; never persist this object directly."""
+
+    access_token: str
+    refresh_token: str
+    expires_at: datetime
+    scopes: FrozenSet[str]
+
+
+@dataclass(frozen=True)
+class OAuthConnection:
+    connection_id: str
+    user_id: str
+    provider: str
+    status: ConnectionStatus
+    encrypted_access_token: str
+    encrypted_refresh_token: str
+    expires_at: datetime
+    scopes: FrozenSet[str]
+
+
 class OrderState(str, Enum):
     INTENT = "intent"
     RISK_APPROVED = "risk_approved"

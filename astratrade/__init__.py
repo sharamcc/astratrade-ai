@@ -3,6 +3,9 @@
 from .domain import (
     AccountSnapshot,
     AgentStatus,
+    ConnectionStatus,
+    OAuthConnection,
+    OAuthTokenSet,
     OrderRecord,
     OrderState,
     OrderIntent,
@@ -13,10 +16,14 @@ from .domain import (
     User,
 )
 from .risk import evaluate_signal
+from .oauth import OAuthService, OAuthStart
 
 __all__ = [
     "AccountSnapshot",
     "AgentStatus",
+    "ConnectionStatus",
+    "OAuthConnection",
+    "OAuthTokenSet",
     "OrderIntent",
     "OrderRecord",
     "OrderState",
@@ -26,4 +33,6 @@ __all__ = [
     "Strategy",
     "User",
     "evaluate_signal",
+    "OAuthService",
+    "OAuthStart",
 ]
