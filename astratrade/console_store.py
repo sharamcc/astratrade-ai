@@ -652,7 +652,9 @@ class ConsoleStore:
         started = iso(now())
         interval = timedelta(days=7 if strategy["config"].get("frequency") == "weekly" else 1)
         with self.connection:
-            self.connection.execute("INSERT INTO execution_runs(execution_key,strategy_id,user_id,strategy_version,status,started_at) VALUES (?,?,?,?,?,?)", (execution_key, strategy_id, user_id, strategy["current_version"], "running", started))
+            inserted = self.connection.execute("INSERT OR IGNORE INTO execution_runs(execution_key,strategy_id,user_id,strategy_version,status,started_at) VALUES (?,?,?,?,?,?)", (execution_key, strategy_id, user_id, strategy["current_version"], "running", started))
+            if inserted.rowcount == 0:
+                return {"status": "duplicate", "execution_key": execution_key}
             results: list[dict[str, Any]] = []
             for signal in signals:
                 signal_status = "skipped"

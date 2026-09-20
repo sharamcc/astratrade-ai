@@ -238,6 +238,15 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/{strategy_b}/signals", cookie=cookie_a)).status, 404)
         self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/{strategy_b}/performance", cookie=cookie_a)).status, 404)
 
+    def test_strategy_schema_migration_is_repeatable(self):
+        cookie = self.register()
+        user_id = self.api.handle(Request("GET", "/v1/auth/me", cookie=cookie)).body["user_id"]
+        before = self.store.connection.execute("SELECT COUNT(*) FROM strategy_instances WHERE user_id=?", (user_id,)).fetchone()[0]
+        ConsoleStore(self.store.connection)
+        after = self.store.connection.execute("SELECT COUNT(*) FROM strategy_instances WHERE user_id=?", (user_id,)).fetchone()[0]
+        self.assertEqual(before, 1)
+        self.assertEqual(after, before)
+
     def test_admin_overview_is_admin_only(self):
         user_cookie = self.register()
         self.assertEqual(self.api.handle(Request("GET", "/v1/admin/overview", cookie=user_cookie)).status, 403)
