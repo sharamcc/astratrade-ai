@@ -224,6 +224,18 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(deactivated.body["status"], "inactive")
         self.assertEqual(self.api.handle(Request("POST", f"/v1/strategies/{copied.body['strategy_id']}/start", cookie=cookie, csrf_token=self.csrf_token)).status, 400)
 
+    def test_strategy_and_signal_reads_are_isolated_between_users(self):
+        cookie_a = self.register("a@example.com")
+        invite_b, _ = self.store.create_invite(self.admin["user_id"])
+        registered_b = self.api.handle(Request("POST", "/v1/auth/register", body={"email": "b@example.com", "password": "correct horse battery staple!", "invite_code": invite_b}))
+        cookie_b = "; ".join(cookie.split(";", 1)[0] for cookie in registered_b.cookies)
+        csrf_b = next(cookie.split(";", 1)[0].split("=", 1)[1] for cookie in registered_b.cookies if cookie.startswith("astra_csrf="))
+        created_b = self.api.handle(Request("POST", "/v1/strategies", cookie=cookie_b, csrf_token=csrf_b, body={"strategy_type": "dca", "config": {"budget_usdt": "20", "frequency": "daily"}}))
+        strategy_b = created_b.body["strategy_id"]
+        self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/{strategy_b}", cookie=cookie_a)).status, 404)
+        self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/{strategy_b}/signals", cookie=cookie_a)).status, 404)
+        self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/{strategy_b}/performance", cookie=cookie_a)).status, 404)
+
     def test_admin_overview_is_admin_only(self):
         user_cookie = self.register()
         self.assertEqual(self.api.handle(Request("GET", "/v1/admin/overview", cookie=user_cookie)).status, 403)

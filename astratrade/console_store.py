@@ -485,6 +485,21 @@ class ConsoleStore:
         if not budget.is_finite() or budget <= 0 or budget > Decimal("500"):
             raise ValueError("budget_usdt must be between 0 and 500 USDT")
 
+    @classmethod
+    def _validate_strategy_limits(cls, strategy_type: str, config: dict[str, Any]) -> None:
+        cls._validate_strategy_budget(config)
+        if config.get("frequency", "daily") not in {"daily", "weekly"}:
+            raise ValueError("frequency must be daily or weekly")
+        if strategy_type == "moving_average":
+            try:
+                cooldown = Decimal(str(config.get("cooldown_hours", 0) or 0))
+            except (InvalidOperation, ValueError) as error:
+                raise ValueError("cooldown_hours must be a valid number") from error
+            if not cooldown.is_finite() or cooldown < 0 or cooldown > Decimal("720"):
+                raise ValueError("cooldown_hours must be between 0 and 720")
+        if strategy_type == "grid" and config.get("out_of_range_policy", "pause") not in {"pause"}:
+            raise ValueError("out_of_range_policy must be pause")
+
     def _save_portfolio_allocations(self, strategy_id: str, version: str, config: dict[str, Any]) -> None:
         allocations = config.get("allocations", [])
         if not isinstance(allocations, list):
@@ -500,7 +515,7 @@ class ConsoleStore:
     def create_strategy(self, user_id: str, strategy_type: str, config: dict[str, Any]) -> dict[str, Any]:
         from .strategies import build_strategy
 
-        self._validate_strategy_budget(config)
+        self._validate_strategy_limits(strategy_type, config)
         build_strategy(strategy_type, config)
         strategy_id = "strategy_" + secrets.token_urlsafe(10)
         created = iso(now())
@@ -520,7 +535,7 @@ class ConsoleStore:
             raise ValueError("strategy not found")
         if row["status"] == "running":
             raise ValueError("stop strategy before changing its configuration")
-        self._validate_strategy_budget(config)
+        self._validate_strategy_limits(row["strategy_type"], config)
         build_strategy(row["strategy_type"], config)
         current = int(str(row["current_version"]).lstrip("v"))
         version = f"v{current + 1}"

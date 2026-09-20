@@ -154,8 +154,12 @@ class ConsoleAPI:
                     self.product.connection.commit()
                     return Response(200, result)
                 if suffix == "signals" and method == "GET":
+                    if not self.product.strategy(user_id, strategy_id):
+                        return self._error(404, "strategy_not_found", "策略不存在或无权查看")
                     return Response(200, {"items": self.product.strategy_signals(user_id, strategy_id)})
                 if suffix == "runs" and method == "GET":
+                    if not self.product.strategy(user_id, strategy_id):
+                        return self._error(404, "strategy_not_found", "策略不存在或无权查看")
                     return Response(200, {"items": self.product.strategy_runs(user_id, strategy_id)})
                 if suffix == "performance" and method == "GET":
                     if not self.product.strategy(user_id, strategy_id):
