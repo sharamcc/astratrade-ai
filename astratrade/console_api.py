@@ -64,7 +64,7 @@ class ConsoleAPI:
                 return self.oauth_api.handle(Request(method, request.path, user_id=user_id, body=body, query=request.query))
             if method == "GET" and path == "/v1/auth/me":
                 user = self.product.get_user(user_id)
-                return Response(200, {"user_id": user_id, "email": user["email"], "role": user["role"]})
+                return Response(200, {"user_id": user_id, "email": user["email"], "role": user["role"]}, cookies=self._refresh_csrf_cookie(request))
             if method == "POST" and path == "/v1/auth/password":
                 self.product.change_password(user_id, str(body.get("current_password", "")), str(body.get("new_password", "")))
                 self.sessions.repository.revoke_user_sessions(user_id)
@@ -156,9 +156,20 @@ class ConsoleAPI:
         return f"astra_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}{secure}"
 
     def _auth_cookies(self, session_token: str) -> tuple[str, ...]:
-        csrf = secrets.token_urlsafe(24)
+        return (self._cookie(session_token), self._new_csrf_cookie())
+
+    def _new_csrf_cookie(self) -> str:
         secure = "; Secure" if self.cookie_secure else ""
-        return (self._cookie(session_token), f"astra_csrf={csrf}; SameSite=Lax; Path=/; Max-Age=28800{secure}")
+        return f"astra_csrf={secrets.token_urlsafe(24)}; SameSite=Lax; Path=/; Max-Age=28800{secure}"
+
+    def _refresh_csrf_cookie(self, request: Request) -> tuple[str, ...]:
+        cookie = SimpleCookie()
+        cookie.load(request.cookie or "")
+        if "astra_session" not in cookie or not cookie["astra_session"].value:
+            return ()
+        if "astra_csrf" in cookie and cookie["astra_csrf"].value:
+            return ()
+        return (self._new_csrf_cookie(),)
 
     def _clear_cookies(self) -> tuple[str, ...]:
         secure = "; Secure" if self.cookie_secure else ""

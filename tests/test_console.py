@@ -100,6 +100,14 @@ class ConsoleTests(unittest.TestCase):
         login = self.api.handle(Request("POST", "/v1/auth/login", remote_addr="127.0.0.1", body={"email": "user@example.com", "password": "new correct horse battery!"}))
         self.assertEqual(login.status, 200)
 
+    def test_existing_session_gets_csrf_cookie_on_identity_refresh(self):
+        cookie = self.register()
+        session_cookie = next(part for part in cookie.split("; ") if part.startswith("astra_session="))
+        refreshed = self.api.handle(Request("GET", "/v1/auth/me", cookie=session_cookie))
+        self.assertEqual(refreshed.status, 200)
+        self.assertEqual(len(refreshed.cookies), 1)
+        self.assertTrue(refreshed.cookies[0].startswith("astra_csrf="))
+
     def test_login_rate_limit_and_failure_audit(self):
         for _ in range(5):
             response = self.api.handle(Request("POST", "/v1/auth/login", remote_addr="10.0.0.8", body={"email": "missing@example.com", "password": "incorrect password"}))
