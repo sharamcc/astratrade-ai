@@ -318,4 +318,5 @@ class ConsoleAPI:
 
     @staticmethod
     def _error(status: int, code: str, message: str) -> Response:
-        return Response(status, {"code": code, "message": message, "error": code})
+        request_id = "req_" + secrets.token_urlsafe(12)
+        return Response(status, {"code": code, "message": message, "requestId": request_id, "error": code}, headers={"X-Request-ID": request_id})

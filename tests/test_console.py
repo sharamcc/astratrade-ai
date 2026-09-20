@@ -247,6 +247,12 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(before, 1)
         self.assertEqual(after, before)
 
+    def test_errors_include_request_id_for_support_correlation(self):
+        response = self.api.handle(Request("GET", "/v1/strategies/not-authenticated"))
+        self.assertEqual(response.status, 401)
+        self.assertRegex(response.body["requestId"], r"^req_")
+        self.assertEqual(response.headers["X-Request-ID"], response.body["requestId"])
+
     def test_portfolio_strategy_uses_independent_simulated_positions(self):
         cookie = self.register()
         user_id = self.api.handle(Request("GET", "/v1/auth/me", cookie=cookie)).body["user_id"]
