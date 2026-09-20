@@ -265,6 +265,14 @@ class ConsoleTests(unittest.TestCase):
         eth = self.store.connection.execute("SELECT quantity FROM sim_positions WHERE user_id=? AND instrument='ETH-USDT'", (user_id,)).fetchone()
         self.assertIsNotNone(eth)
         self.assertGreater(Decimal(eth["quantity"]), Decimal("0"))
+        snapshots = self.store.connection.execute("SELECT instrument, snapshot_id FROM market_snapshots WHERE user_id=? ORDER BY instrument", (user_id,)).fetchall()
+        self.assertEqual({row["instrument"] for row in snapshots}, {"BTC-USDT", "ETH-USDT"})
+        signal_rows = self.store.connection.execute("SELECT instrument, market_snapshot_id FROM strategy_signals WHERE strategy_id=?", (strategy_id,)).fetchall()
+        self.assertEqual({row["instrument"] for row in signal_rows}, {"BTC-USDT", "ETH-USDT"})
+        for row in signal_rows:
+            self.assertTrue(row["market_snapshot_id"].endswith(row["instrument"]))
+        performance = self.api.handle(Request("GET", f"/v1/strategies/{strategy_id}/performance", cookie=cookie))
+        self.assertEqual({item["instrument"] for item in performance.body["positions"]}, {"BTC-USDT", "ETH-USDT"})
 
     def test_grid_api_flow_triggers_level_and_pauses_outside_range(self):
         cookie = self.register()
