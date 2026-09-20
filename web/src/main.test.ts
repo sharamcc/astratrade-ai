@@ -8,6 +8,7 @@ describe("console presentation helpers", () => {
 
   it("maps audit event names to user-facing Chinese labels", () => {
     expect(eventLabel("simulation_order_filled")).toBe("模拟订单已成交");
-    expect(eventLabel("unknown_event")).toBe("unknown_event");
+    expect(eventLabel("market_price_stale")).toBe("行情暂不可用");
+    expect(eventLabel("unknown_event")).toBe("其他操作");
   });
 });
