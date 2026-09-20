@@ -187,6 +187,9 @@ class ConsoleStore:
                 threshold TEXT,
                 actual TEXT,
                 reason TEXT NOT NULL,
+                reasons TEXT,
+                estimated_risk TEXT,
+                estimated_notional TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_risk_decisions_user_created
@@ -276,6 +279,9 @@ class ConsoleStore:
             "threshold": "TEXT",
             "actual": "TEXT",
             "reason": "TEXT NOT NULL DEFAULT ''",
+            "reasons": "TEXT",
+            "estimated_risk": "TEXT",
+            "estimated_notional": "TEXT",
         }
         for column, definition in additions.items():
             if column not in columns:
@@ -727,7 +733,7 @@ class ConsoleStore:
         return {"status": final_status, "execution_key": execution_key, "signals": results}
 
     def _record_risk_decision(self, user_id: str, signal_id: str, allowed: bool, reason: str, threshold: Any, actual: Any) -> None:
-        self.connection.execute("INSERT INTO risk_decisions(decision_id,signal_id,user_id,allowed,rule,threshold,actual,reason,created_at) VALUES (?,?,?,?,?,?,?,?,?)", ("risk_" + secrets.token_urlsafe(10), signal_id, user_id, 1 if allowed else 0, "strategy_simulation_guard", str(threshold) if threshold is not None else None, str(actual) if actual is not None else None, reason, iso(now())))
+        self.connection.execute("INSERT INTO risk_decisions(decision_id,signal_id,user_id,allowed,rule,threshold,actual,reason,reasons,estimated_risk,estimated_notional,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", ("risk_" + secrets.token_urlsafe(10), signal_id, user_id, 1 if allowed else 0, "strategy_simulation_guard", str(threshold) if threshold is not None else None, str(actual) if actual is not None else None, reason, reason, str(actual) if actual is not None else "0", str(threshold) if threshold is not None else "0", iso(now())))
 
     def _record_strategy_performance_snapshot(self, user_id: str, strategy_id: str, price: Decimal, execution_key: str, created_at: str, market_prices: Optional[dict[str, Decimal]] = None) -> None:
         account = self.connection.execute("SELECT cash_usdt, btc, initial_cash_usdt FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()
