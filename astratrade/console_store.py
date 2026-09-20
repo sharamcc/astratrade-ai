@@ -66,6 +66,13 @@ class ConsoleStore:
                 initial_cash_usdt TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sim_positions (
+                user_id TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                quantity TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, instrument)
+            );
             CREATE TABLE IF NOT EXISTS agent_configs (
                 user_id TEXT PRIMARY KEY,
                 budget_usdt TEXT NOT NULL,
@@ -244,6 +251,9 @@ class ConsoleStore:
             )
             """
         )
+        self.connection.execute(
+            "INSERT OR IGNORE INTO sim_positions(user_id,instrument,quantity,updated_at) SELECT user_id,'BTC-USDT',btc,updated_at FROM sim_accounts"
+        )
         self._migrate_legacy_agents()
         self.connection.commit()
 
@@ -289,6 +299,7 @@ class ConsoleStore:
                 "INSERT INTO sim_accounts VALUES (?,?,?,?,?)",
                 (user_id, "10000.00", "0", "10000.00", created),
             )
+            self.connection.execute("INSERT INTO sim_positions VALUES (?,?,?,?)", (user_id, "BTC-USDT", "0", created))
             self.connection.execute(
                 "INSERT INTO agent_configs VALUES (?,?,?,?,?,?,?)",
                 (user_id, "100.00", "daily", "stopped", None, None, created),
@@ -321,6 +332,7 @@ class ConsoleStore:
         with self.connection:
             self.connection.execute("INSERT INTO console_users VALUES (?,?,?,?,?)", (user_id, email, hash_password(password), "admin", created))
             self.connection.execute("INSERT INTO sim_accounts VALUES (?,?,?,?,?)", (user_id, "10000.00", "0", "10000.00", created))
+            self.connection.execute("INSERT INTO sim_positions VALUES (?,?,?,?)", (user_id, "BTC-USDT", "0", created))
             self.connection.execute("INSERT INTO agent_configs VALUES (?,?,?,?,?,?,?)", (user_id, "100.00", "daily", "stopped", None, None, created))
             self._ensure_legacy_strategy(user_id, "100.00", "daily", created)
             self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, "10000.00", "0", "0", "10000.00", "0", created))
@@ -624,7 +636,7 @@ class ConsoleStore:
         rows = self.connection.execute("SELECT * FROM strategy_instances WHERE status='running' AND next_run_at IS NOT NULL AND next_run_at <= ?", (iso(at),)).fetchall()
         return [self._strategy_payload(row) for row in rows]
 
-    def run_strategy_once(self, user_id: str, strategy_id: str, price: Decimal, observed_at: Optional[str] = None, prices: tuple[Decimal, ...] = ()) -> dict[str, Any]:
+    def run_strategy_once(self, user_id: str, strategy_id: str, price: Decimal, observed_at: Optional[str] = None, prices: tuple[Decimal, ...] = (), market_prices: Optional[dict[str, Decimal]] = None) -> dict[str, Any]:
         from .strategies import MarketSnapshot, StrategyContext, build_strategy
 
         strategy = self.strategy(user_id, strategy_id)
@@ -640,7 +652,10 @@ class ConsoleStore:
         history = tuple(Decimal(row["price"]) for row in history_rows if Decimal(row["price"]) > 0)
         price_history = prices or history + (price,)
         previous_price = price_history[-2] if len(price_history) > 1 else None
-        allocations = tuple(strategy["config"].get("market_prices", ()))
+        supplied_prices = market_prices or {str(item["instrument"]): Decimal(str(item["price"])) for item in strategy["config"].get("market_prices", ()) if isinstance(item, dict) and item.get("price") is not None}
+        allocations = tuple({**item, "price": str(supplied_prices[item["instrument"]])} for item in strategy["config"].get("allocations", ()) if isinstance(item, dict) and item.get("instrument") in supplied_prices)
+        instrument_prices = {"BTC-USDT": price}
+        instrument_prices.update({str(item["instrument"]): Decimal(str(item["price"])) for item in allocations if isinstance(item, dict) and item.get("price") is not None})
         cooldown_hours = Decimal(str(strategy["config"].get("cooldown_hours", 0) or 0))
         last_run = parse(strategy.get("last_run_at"))
         cooldown_active = bool(last_run and cooldown_hours > 0 and now() < last_run + timedelta(hours=float(cooldown_hours)))
@@ -661,7 +676,7 @@ class ConsoleStore:
                 result: dict[str, Any] = {"signal_id": signal.signal_id, "action": signal.action, "reason": signal.reason, "status": signal_status}
                 self.connection.execute("INSERT INTO strategy_signals VALUES (?,?,?,?,?,?,?,?,?,?,?)", (signal.signal_id, strategy_id, user_id, signal.strategy_version, signal.instrument, signal.action, str(signal.requested_notional), signal.reason, signal.market_snapshot_id, signal_status, started))
                 if signal.action in {"buy", "sell"} and signal.requested_notional > 0:
-                    result = self._fill_strategy_signal(user_id, signal, price, execution_key)
+                    result = self._fill_strategy_signal(user_id, signal, instrument_prices.get(signal.instrument, price), execution_key)
                     self.connection.execute("UPDATE strategy_signals SET status=? WHERE signal_id=?", (result["status"], signal.signal_id))
                     self._record_risk_decision(user_id, signal.signal_id, result["status"] != "risk_blocked", result["reason"], signal.requested_notional, result.get("actual"))
                 else:
@@ -688,10 +703,10 @@ class ConsoleStore:
         self.connection.execute("INSERT OR IGNORE INTO strategy_performance_snapshots(snapshot_id,strategy_id,user_id,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (f"strategy-performance:{execution_key}", strategy_id, user_id, str(price), str(equity), str(pnl), created_at))
 
     def _fill_strategy_signal(self, user_id: str, signal: Any, price: Decimal, execution_key: str) -> dict[str, Any]:
-        if signal.instrument != "BTC-USDT":
-            self.audit(user_id, "risk_blocked", {"reason": "instrument_not_supported_by_simulation_ledger", "instrument": signal.instrument, "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
-            self.notify(user_id, "risk_blocked", "策略执行被拦截", f"当前模拟账本暂不支持 {signal.instrument}，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
-            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "instrument_not_supported_by_simulation_ledger", "status": "risk_blocked"}
+        if price <= 0:
+            self.audit(user_id, "risk_blocked", {"reason": "invalid_market_price", "instrument": signal.instrument, "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
+            self.notify(user_id, "risk_blocked", "策略执行被拦截", f"{signal.instrument} 行情无效，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
+            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "invalid_market_price", "status": "risk_blocked"}
         account = self.connection.execute("SELECT * FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()
         if not account:
             self.notify(user_id, "risk_blocked", "策略执行被拦截", "模拟账户不存在，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
@@ -700,12 +715,13 @@ class ConsoleStore:
         fee = (notional * Decimal("0.001")).quantize(Decimal("0.00000001"))
         quantity = (notional / price).quantize(Decimal("0.00000001"))
         cash = Decimal(account["cash_usdt"])
-        btc = Decimal(account["btc"])
+        position = self.connection.execute("SELECT quantity FROM sim_positions WHERE user_id=? AND instrument=?", (user_id, signal.instrument)).fetchone()
+        holdings = Decimal(position["quantity"]) if position else Decimal("0")
         if signal.action == "buy" and cash < notional + fee:
             self.audit(user_id, "risk_blocked", {"reason": "insufficient_cash_or_invalid_price", "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
             self.notify(user_id, "risk_blocked", "策略执行被拦截", "可用模拟余额不足，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
             return {"signal_id": signal.signal_id, "action": signal.action, "reason": "insufficient_cash_or_invalid_price", "status": "risk_blocked"}
-        if signal.action == "sell" and btc < quantity:
+        if signal.action == "sell" and holdings < quantity:
             self.audit(user_id, "risk_blocked", {"reason": "insufficient_btc", "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
             self.notify(user_id, "risk_blocked", "策略执行被拦截", "模拟 BTC 持仓不足，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
             return {"signal_id": signal.signal_id, "action": signal.action, "reason": "insufficient_btc", "status": "risk_blocked"}
@@ -713,9 +729,11 @@ class ConsoleStore:
         order_id = "sim_" + secrets.token_urlsafe(10)
         created = iso(now())
         next_cash = cash - notional - fee if signal.action == "buy" else cash + notional - fee
-        next_btc = btc + quantity if signal.action == "buy" else btc - quantity
+        next_holdings = holdings + quantity if signal.action == "buy" else holdings - quantity
+        next_btc = next_holdings if signal.instrument == "BTC-USDT" else Decimal(account["btc"])
         equity = next_cash + next_btc * price
         self.connection.execute("UPDATE sim_accounts SET cash_usdt=?, btc=?, updated_at=? WHERE user_id=?", (str(next_cash), str(next_btc), created, user_id))
+        self.connection.execute("INSERT INTO sim_positions(user_id,instrument,quantity,updated_at) VALUES (?,?,?,?) ON CONFLICT(user_id,instrument) DO UPDATE SET quantity=excluded.quantity, updated_at=excluded.updated_at", (user_id, signal.instrument, str(next_holdings), created))
         self.connection.execute("INSERT INTO sim_orders VALUES (?,?,?,?,?,?,?,?,?,?,?)", (order_id, f"{execution_key}:{signal.signal_id}", user_id, signal.instrument, signal.action, str(quantity), str(price), str(notional), str(fee), "filled", created))
         self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, str(next_cash), str(next_btc), str(price), str(equity), str(equity - Decimal(account["initial_cash_usdt"])), created))
         self.audit(user_id, "strategy_order_filled", {"order_id": order_id, "strategy_id": signal.strategy_id, "strategy_version": signal.strategy_version, "signal_id": signal.signal_id, "reason": signal.reason, "fee": str(fee)})

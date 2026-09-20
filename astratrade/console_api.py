@@ -15,7 +15,7 @@ from .auth import SessionAuth
 from .console_store import ConsoleStore
 from .domain import User
 from .rate_limit import RateLimiter
-from .simulation import current_btc_price, run_once
+from .simulation import current_btc_price, current_market_prices, run_once
 
 
 class ConsoleAPI:
@@ -138,7 +138,11 @@ class ConsoleAPI:
                     run = None
                     if suffix == "start":
                         try:
-                            run = self.product.run_strategy_once(user_id, strategy_id, self._price(), result["next_run_at"])
+                            configured = self.product.strategy(user_id, strategy_id) or result
+                            instruments = [str(item["instrument"]) for item in configured["config"].get("allocations", []) if isinstance(item, dict) and item.get("instrument")]
+                            market_prices = current_market_prices(instruments or ["BTC-USDT"])
+                            btc_price = market_prices.get("BTC-USDT") or self._price()
+                            run = self.product.run_strategy_once(user_id, strategy_id, btc_price, result["next_run_at"], market_prices=market_prices)
                         except Exception:
                             run = self.product.record_strategy_market_failure(user_id, strategy_id)
                     self.product.connection.commit()
