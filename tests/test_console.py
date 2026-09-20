@@ -207,6 +207,8 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(run_due(self.store, Decimal("60000")), 1)
         performance = self.api.handle(Request("GET", f"/v1/strategies/{strategy_id}/performance", cookie=cookie))
         self.assertEqual(performance.body["filled_run_count"], 1)
+        self.assertEqual(performance.body["equity_current_usdt"], "9999.97520000")
+        self.assertEqual(performance.body["max_drawdown_usdt"], "0")
         export = self.api.handle(Request("GET", "/v1/export/strategies", cookie=cookie))
         self.assertEqual(export.status, 200)
         self.assertIn("signal_id", export.body["content"])
