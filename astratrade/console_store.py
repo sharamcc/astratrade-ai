@@ -408,9 +408,19 @@ class ConsoleStore:
         result["config"] = json.loads(result["config"])
         return result
 
+    @staticmethod
+    def _validate_strategy_budget(config: dict[str, Any]) -> None:
+        try:
+            budget = Decimal(str(config["budget_usdt"]))
+        except (KeyError, InvalidOperation, ValueError) as error:
+            raise ValueError("budget_usdt must be a valid number") from error
+        if not budget.is_finite() or budget <= 0 or budget > Decimal("500"):
+            raise ValueError("budget_usdt must be between 0 and 500 USDT")
+
     def create_strategy(self, user_id: str, strategy_type: str, config: dict[str, Any]) -> dict[str, Any]:
         from .strategies import build_strategy
 
+        self._validate_strategy_budget(config)
         build_strategy(strategy_type, config)
         strategy_id = "strategy_" + secrets.token_urlsafe(10)
         created = iso(now())
@@ -429,6 +439,7 @@ class ConsoleStore:
             raise ValueError("strategy not found")
         if row["status"] == "running":
             raise ValueError("stop strategy before changing its configuration")
+        self._validate_strategy_budget(config)
         build_strategy(row["strategy_type"], config)
         current = int(str(row["current_version"]).lstrip("v"))
         version = f"v{current + 1}"
@@ -456,6 +467,94 @@ class ConsoleStore:
     def strategy_runs(self, user_id: str, strategy_id: str) -> list[dict[str, Any]]:
         rows = self.connection.execute("SELECT * FROM strategy_runs WHERE user_id=? AND strategy_id=? ORDER BY started_at DESC LIMIT 100", (user_id, strategy_id)).fetchall()
         return [dict(row) for row in rows]
+
+    def due_strategies(self, at: datetime) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM strategy_instances WHERE status='running' AND next_run_at IS NOT NULL AND next_run_at <= ?", (iso(at),)).fetchall()
+        return [self._strategy_payload(row) for row in rows]
+
+    def run_strategy_once(self, user_id: str, strategy_id: str, price: Decimal, observed_at: Optional[str] = None, prices: tuple[Decimal, ...] = ()) -> dict[str, Any]:
+        from .strategies import MarketSnapshot, StrategyContext, build_strategy
+
+        strategy = self.strategy(user_id, strategy_id)
+        if not strategy:
+            raise ValueError("strategy not found")
+        observed = observed_at or strategy.get("next_run_at") or iso(now())
+        execution_key = f"{strategy_id}:{strategy['current_version']}:{observed}"
+        existing = self.connection.execute("SELECT status FROM strategy_runs WHERE execution_key=?", (execution_key,)).fetchone()
+        if existing:
+            return {"status": "duplicate", "execution_key": execution_key}
+        implementation = build_strategy(strategy["strategy_type"], strategy["config"])
+        history_rows = self.connection.execute("SELECT price FROM sim_snapshots WHERE user_id=? AND price != '0' ORDER BY id", (user_id,)).fetchall()
+        history = tuple(Decimal(row["price"]) for row in history_rows if Decimal(row["price"]) > 0)
+        price_history = prices or history + (price,)
+        previous_price = price_history[-2] if len(price_history) > 1 else None
+        allocations = tuple(strategy["config"].get("market_prices", ()))
+        context = StrategyContext(user_id, strategy_id, strategy["current_version"], MarketSnapshot("BTC-USDT", price, observed, "market:" + observed), price_history, previous_price, allocations)
+        signals = implementation.evaluate(context)
+        started = iso(now())
+        interval = timedelta(days=7 if strategy["config"].get("frequency") == "weekly" else 1)
+        with self.connection:
+            self.connection.execute("INSERT INTO strategy_runs(execution_key,strategy_id,user_id,strategy_version,status,started_at) VALUES (?,?,?,?,?,?)", (execution_key, strategy_id, user_id, strategy["current_version"], "running", started))
+            results: list[dict[str, Any]] = []
+            for signal in signals:
+                signal_status = "skipped"
+                result: dict[str, Any] = {"signal_id": signal.signal_id, "action": signal.action, "reason": signal.reason, "status": signal_status}
+                self.connection.execute("INSERT INTO strategy_signals VALUES (?,?,?,?,?,?,?,?,?,?,?)", (signal.signal_id, strategy_id, user_id, signal.strategy_version, signal.instrument, signal.action, str(signal.requested_notional), signal.reason, signal.market_snapshot_id, signal_status, started))
+                if signal.action in {"buy", "sell"} and signal.requested_notional > 0:
+                    result = self._fill_strategy_signal(user_id, signal, price, execution_key)
+                    self.connection.execute("UPDATE strategy_signals SET status=? WHERE signal_id=?", (result["status"], signal.signal_id))
+                results.append(result)
+            final_status = "filled" if any(item["status"] == "filled" for item in results) else ("risk_blocked" if any(item["status"] == "risk_blocked" for item in results) else "skipped")
+            finished = iso(now())
+            self.connection.execute("UPDATE strategy_runs SET status=?, finished_at=? WHERE execution_key=?", (final_status, finished, execution_key))
+            self.connection.execute("UPDATE strategy_instances SET last_run_at=?, next_run_at=?, updated_at=? WHERE user_id=? AND strategy_id=?", (finished, iso(now() + interval), finished, user_id, strategy_id))
+        return {"status": final_status, "execution_key": execution_key, "signals": results}
+
+    def _fill_strategy_signal(self, user_id: str, signal: Any, price: Decimal, execution_key: str) -> dict[str, Any]:
+        if signal.instrument != "BTC-USDT":
+            self.audit(user_id, "risk_blocked", {"reason": "instrument_not_supported_by_simulation_ledger", "instrument": signal.instrument, "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
+            self.notify(user_id, "risk_blocked", "策略执行被拦截", f"当前模拟账本暂不支持 {signal.instrument}，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
+            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "instrument_not_supported_by_simulation_ledger", "status": "risk_blocked"}
+        account = self.connection.execute("SELECT * FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()
+        if not account:
+            self.notify(user_id, "risk_blocked", "策略执行被拦截", "模拟账户不存在，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
+            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "simulation_account_missing", "status": "risk_blocked"}
+        notional = signal.requested_notional
+        fee = (notional * Decimal("0.001")).quantize(Decimal("0.00000001"))
+        quantity = (notional / price).quantize(Decimal("0.00000001"))
+        cash = Decimal(account["cash_usdt"])
+        btc = Decimal(account["btc"])
+        if signal.action == "buy" and cash < notional + fee:
+            self.audit(user_id, "risk_blocked", {"reason": "insufficient_cash_or_invalid_price", "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
+            self.notify(user_id, "risk_blocked", "策略执行被拦截", "可用模拟余额不足，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
+            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "insufficient_cash_or_invalid_price", "status": "risk_blocked"}
+        if signal.action == "sell" and btc < quantity:
+            self.audit(user_id, "risk_blocked", {"reason": "insufficient_btc", "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
+            self.notify(user_id, "risk_blocked", "策略执行被拦截", "模拟 BTC 持仓不足，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
+            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "insufficient_btc", "status": "risk_blocked"}
+
+        order_id = "sim_" + secrets.token_urlsafe(10)
+        created = iso(now())
+        next_cash = cash - notional - fee if signal.action == "buy" else cash + notional - fee
+        next_btc = btc + quantity if signal.action == "buy" else btc - quantity
+        equity = next_cash + next_btc * price
+        self.connection.execute("UPDATE sim_accounts SET cash_usdt=?, btc=?, updated_at=? WHERE user_id=?", (str(next_cash), str(next_btc), created, user_id))
+        self.connection.execute("INSERT INTO sim_orders VALUES (?,?,?,?,?,?,?,?,?,?,?)", (order_id, f"{execution_key}:{signal.signal_id}", user_id, signal.instrument, signal.action, str(quantity), str(price), str(notional), str(fee), "filled", created))
+        self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, str(next_cash), str(next_btc), str(price), str(equity), str(equity - Decimal(account["initial_cash_usdt"])), created))
+        self.audit(user_id, "strategy_order_filled", {"order_id": order_id, "strategy_id": signal.strategy_id, "strategy_version": signal.strategy_version, "signal_id": signal.signal_id, "reason": signal.reason, "fee": str(fee)})
+        self.notify(user_id, "order_filled", "策略模拟订单已成交", f"{signal.instrument} {signal.action} {quantity}，手续费 {fee} USDT。", "order", order_id, f"strategy-order:{order_id}")
+        return {"signal_id": signal.signal_id, "order_id": order_id, "action": signal.action, "reason": signal.reason, "status": "filled", "fee_usdt": str(fee)}
+
+    def record_strategy_market_failure(self, user_id: str, strategy_id: str) -> dict[str, str]:
+        scheduled = self.strategy(user_id, strategy_id)
+        if not scheduled:
+            raise ValueError("strategy not found")
+        interval = timedelta(days=7 if scheduled["config"].get("frequency") == "weekly" else 1)
+        current = now()
+        self.audit(user_id, "market_price_stale", {"instrument": "BTC-USDT", "strategy_id": strategy_id, "failure_category": "market_price_unavailable"})
+        self.notify(user_id, "market_price_stale", "策略行情暂不可用", "本次策略执行已跳过，未扣除模拟余额。", "strategy", strategy_id, f"strategy_market_price:{strategy_id}:{scheduled.get('next_run_at') or iso(current)}")
+        self.connection.execute("UPDATE strategy_instances SET last_run_at=?, next_run_at=?, updated_at=? WHERE user_id=? AND strategy_id=?", (iso(current), iso(current + interval), iso(current), user_id, strategy_id))
+        return {"status": "risk_blocked", "reason": "stale_market_price"}
 
     def analytics(self, user_id: str, price: Decimal) -> dict[str, Any]:
         account = self.connection.execute("SELECT * FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()

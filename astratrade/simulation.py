@@ -45,4 +45,13 @@ def run_due(store: ConsoleStore, price: Decimal | None = None) -> int:
     for agent in store.due_agents(now()):
         run_once(store, agent["user_id"], price)
         count += 1
+    for strategy in store.due_strategies(now()):
+        scheduled = strategy.get("next_run_at")
+        try:
+            strategy_price = price if price is not None else current_btc_price()
+            store.run_strategy_once(strategy["user_id"], strategy["strategy_id"], strategy_price, scheduled)
+        except Exception:
+            store.record_strategy_market_failure(strategy["user_id"], strategy["strategy_id"])
+        store.connection.commit()
+        count += 1
     return count

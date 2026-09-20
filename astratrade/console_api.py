@@ -135,8 +135,14 @@ class ConsoleAPI:
                 if suffix in {"start", "stop"} and method == "POST":
                     result = self.product.set_strategy_status(user_id, strategy_id, "running" if suffix == "start" else "stopped")
                     self.product.audit(user_id, "strategy_started" if suffix == "start" else "strategy_stopped", {"strategy_id": strategy_id, "strategy_version": result["current_version"]})
+                    run = None
+                    if suffix == "start":
+                        try:
+                            run = self.product.run_strategy_once(user_id, strategy_id, self._price(), result["next_run_at"])
+                        except Exception:
+                            run = self.product.record_strategy_market_failure(user_id, strategy_id)
                     self.product.connection.commit()
-                    return Response(200, result)
+                    return Response(200, {"strategy": self.product.strategy(user_id, strategy_id), "run": run} if suffix == "start" else result)
                 if suffix == "signals" and method == "GET":
                     return Response(200, {"items": self.product.strategy_signals(user_id, strategy_id)})
                 if suffix == "runs" and method == "GET":

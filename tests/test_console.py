@@ -152,14 +152,46 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual([item["strategy_id"] for item in listed.body["items"]], [strategy_id])
         updated = self.api.handle(Request("PUT", f"/v1/strategies/{strategy_id}", cookie=cookie, csrf_token=self.csrf_token, body={"config": {"short_window": 8, "long_window": 30, "budget_usdt": "30"}}))
         self.assertEqual(updated.body["current_version"], "v2")
-        started = self.api.handle(Request("POST", f"/v1/strategies/{strategy_id}/start", cookie=cookie, csrf_token=self.csrf_token))
-        self.assertEqual(started.body["status"], "running")
+        with patch.dict("os.environ", {"ASTRA_SIM_PRICE": "60000"}):
+            started = self.api.handle(Request("POST", f"/v1/strategies/{strategy_id}/start", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(started.body["strategy"]["status"], "running")
+        self.assertEqual(started.body["run"]["status"], "skipped")
+        self.assertEqual(len(self.store.strategy_runs(started.body["strategy"]["user_id"], strategy_id)), 1)
         blocked_update = self.api.handle(Request("PUT", f"/v1/strategies/{strategy_id}", cookie=cookie, csrf_token=self.csrf_token, body={"config": {"short_window": 5, "long_window": 20, "budget_usdt": "25"}}))
         self.assertEqual(blocked_update.status, 400)
         stopped = self.api.handle(Request("POST", f"/v1/strategies/{strategy_id}/stop", cookie=cookie, csrf_token=self.csrf_token))
         self.assertEqual(stopped.body["status"], "stopped")
-        self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/{strategy_id}/signals", cookie=cookie)).body["items"], [])
+        self.assertEqual(len(self.api.handle(Request("GET", f"/v1/strategies/{strategy_id}/signals", cookie=cookie)).body["items"]), 1)
         self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/not-owned", cookie=cookie)).status, 404)
+
+    def test_strategy_start_fills_once_and_repeated_scheduled_key_is_idempotent(self):
+        cookie = self.register()
+        user_id = self.api.handle(Request("GET", "/v1/auth/me", cookie=cookie)).body["user_id"]
+        created = self.api.handle(Request("POST", "/v1/strategies", cookie=cookie, csrf_token=self.csrf_token, body={"strategy_type": "dca", "config": {"budget_usdt": "25", "frequency": "daily"}}))
+        strategy_id = created.body["strategy_id"]
+        with patch.dict("os.environ", {"ASTRA_SIM_PRICE": "60000"}):
+            started = self.api.handle(Request("POST", f"/v1/strategies/{strategy_id}/start", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(started.body["run"]["status"], "filled")
+        self.assertEqual(len(self.store.orders(user_id)), 1)
+        duplicate = self.store.run_strategy_once(user_id, strategy_id, Decimal("60000"), started.body["run"]["execution_key"].split(":", 2)[2])
+        self.assertEqual(duplicate["status"], "duplicate")
+        self.assertEqual(len(self.store.orders(user_id)), 1)
+
+    def test_strategy_risk_block_is_audited_and_notified(self):
+        cookie = self.register()
+        created = self.api.handle(Request("POST", "/v1/strategies", cookie=cookie, csrf_token=self.csrf_token, body={"strategy_type": "dca", "config": {"budget_usdt": "500", "frequency": "daily"}}))
+        strategy_id = created.body["strategy_id"]
+        user_id = created.body["user_id"]
+        self.store.connection.execute("UPDATE sim_accounts SET cash_usdt='100' WHERE user_id=?", (user_id,))
+        self.store.connection.commit()
+        with patch.dict("os.environ", {"ASTRA_SIM_PRICE": "60000"}):
+            started = self.api.handle(Request("POST", f"/v1/strategies/{strategy_id}/start", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(started.body["run"]["status"], "risk_blocked")
+        self.assertEqual(self.store.orders(user_id), [])
+        events = self.store.audit_events(user_id)
+        self.assertTrue(any(event["event_type"] == "risk_blocked" for event in events))
+        notices = self.store.notifications(user_id)
+        self.assertTrue(any(item["notification_type"] == "risk_blocked" for item in notices))
 
     def test_admin_overview_is_admin_only(self):
         user_cookie = self.register()
