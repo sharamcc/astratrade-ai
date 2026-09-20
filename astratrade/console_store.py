@@ -41,6 +41,7 @@ class ConsoleStore:
         self.create_schema()
 
     def create_schema(self) -> None:
+        self._migrate_legacy_risk_decisions()
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS console_users (
@@ -256,6 +257,29 @@ class ConsoleStore:
         )
         self._migrate_legacy_agents()
         self.connection.commit()
+
+    def _migrate_legacy_risk_decisions(self) -> None:
+        """Extend the pre-console risk table without dropping historical decisions."""
+        table = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='risk_decisions'"
+        ).fetchone()
+        if not table:
+            return
+        columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(risk_decisions)").fetchall()
+        }
+        additions = {
+            "decision_id": "TEXT",
+            "user_id": "TEXT",
+            "rule": "TEXT NOT NULL DEFAULT 'legacy'",
+            "threshold": "TEXT",
+            "actual": "TEXT",
+            "reason": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, definition in additions.items():
+            if column not in columns:
+                self.connection.execute(f"ALTER TABLE risk_decisions ADD COLUMN {column} {definition}")
 
     def _migrate_legacy_agents(self) -> None:
         rows = self.connection.execute("SELECT user_id, budget_usdt, frequency FROM agent_configs").fetchall()

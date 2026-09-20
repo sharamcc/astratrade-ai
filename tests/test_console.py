@@ -310,6 +310,16 @@ class ConsoleTests(unittest.TestCase):
         failures = self.store.connection.execute("SELECT COUNT(*) FROM console_audit WHERE event_type='login_failed'").fetchone()[0]
         self.assertEqual(failures, 5)
 
+    def test_legacy_risk_decisions_schema_is_extended_without_data_loss(self):
+        connection = sqlite3.connect(":memory:")
+        connection.execute("CREATE TABLE risk_decisions (signal_id TEXT PRIMARY KEY, allowed INTEGER NOT NULL, reasons TEXT NOT NULL, estimated_risk TEXT NOT NULL, estimated_notional TEXT NOT NULL, created_at TEXT NOT NULL)")
+        connection.execute("INSERT INTO risk_decisions VALUES ('legacy-signal', 1, 'ok', '{}', '10', '2026-01-01T00:00:00+00:00')")
+        ConsoleStore(connection)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(risk_decisions)")}
+        self.assertTrue({"decision_id", "user_id", "rule", "threshold", "actual", "reason"}.issubset(columns))
+        self.assertEqual(tuple(connection.execute("SELECT signal_id, allowed FROM risk_decisions").fetchone()), ("legacy-signal", 1))
+        connection.close()
+
 
 if __name__ == "__main__":
     unittest.main()
