@@ -150,7 +150,7 @@ class ConsoleTests(unittest.TestCase):
         strategy_id = created.body["strategy_id"]
         self.assertEqual(created.body["current_version"], "v1")
         listed = self.api.handle(Request("GET", "/v1/strategies", cookie=cookie))
-        self.assertEqual([item["strategy_id"] for item in listed.body["items"]], [strategy_id])
+        self.assertIn(strategy_id, [item["strategy_id"] for item in listed.body["items"]])
         updated = self.api.handle(Request("PUT", f"/v1/strategies/{strategy_id}", cookie=cookie, csrf_token=self.csrf_token, body={"config": {"short_window": 8, "long_window": 30, "budget_usdt": "30"}}))
         self.assertEqual(updated.body["current_version"], "v2")
         with patch.dict("os.environ", {"ASTRA_SIM_PRICE": "60000"}):
@@ -212,6 +212,17 @@ class ConsoleTests(unittest.TestCase):
         self.assertIn("signal_id", export.body["content"])
         self.assertIn(strategy_id, export.body["content"])
         self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/{strategy_id}/signals", cookie=cookie)).body["items"][0]["risk_allowed"], 1)
+
+    def test_legacy_agent_is_migrated_and_strategy_can_copy_or_deactivate(self):
+        cookie = self.register()
+        strategies = self.api.handle(Request("GET", "/v1/strategies", cookie=cookie)).body["items"]
+        legacy = next(item for item in strategies if item["strategy_id"].startswith("legacy_dca_"))
+        self.assertEqual(legacy["strategy_type"], "dca")
+        copied = self.api.handle(Request("POST", f"/v1/strategies/{legacy['strategy_id']}/copy", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(copied.status, 201)
+        deactivated = self.api.handle(Request("POST", f"/v1/strategies/{copied.body['strategy_id']}/deactivate", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(deactivated.body["status"], "inactive")
+        self.assertEqual(self.api.handle(Request("POST", f"/v1/strategies/{copied.body['strategy_id']}/start", cookie=cookie, csrf_token=self.csrf_token)).status, 400)
 
     def test_admin_overview_is_admin_only(self):
         user_cookie = self.register()

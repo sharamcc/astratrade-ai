@@ -143,6 +143,16 @@ class ConsoleAPI:
                             run = self.product.record_strategy_market_failure(user_id, strategy_id)
                     self.product.connection.commit()
                     return Response(200, {"strategy": self.product.strategy(user_id, strategy_id), "run": run} if suffix == "start" else result)
+                if suffix == "copy" and method == "POST":
+                    result = self.product.copy_strategy(user_id, strategy_id)
+                    self.product.audit(user_id, "strategy_copied", {"source_strategy_id": strategy_id, "strategy_id": result["strategy_id"], "strategy_version": result["current_version"]})
+                    self.product.connection.commit()
+                    return Response(201, result)
+                if suffix == "deactivate" and method == "POST":
+                    result = self.product.deactivate_strategy(user_id, strategy_id)
+                    self.product.audit(user_id, "strategy_deactivated", {"strategy_id": strategy_id, "strategy_version": result["current_version"]})
+                    self.product.connection.commit()
+                    return Response(200, result)
                 if suffix == "signals" and method == "GET":
                     return Response(200, {"items": self.product.strategy_signals(user_id, strategy_id)})
                 if suffix == "runs" and method == "GET":

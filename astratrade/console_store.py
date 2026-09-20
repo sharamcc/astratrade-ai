@@ -233,7 +233,19 @@ class ConsoleStore:
             )
             """
         )
+        self._migrate_legacy_agents()
         self.connection.commit()
+
+    def _migrate_legacy_agents(self) -> None:
+        rows = self.connection.execute("SELECT user_id, budget_usdt, frequency FROM agent_configs").fetchall()
+        for row in rows:
+            self._ensure_legacy_strategy(row["user_id"], str(row["budget_usdt"]), str(row["frequency"]), iso(now()))
+
+    def _ensure_legacy_strategy(self, user_id: str, budget: str, frequency: str, created: str) -> None:
+        strategy_id = f"legacy_dca_{user_id}"
+        config = json.dumps({"budget_usdt": budget, "frequency": frequency}, ensure_ascii=False, sort_keys=True)
+        self.connection.execute("INSERT OR IGNORE INTO strategy_instances(strategy_id,user_id,strategy_type,current_version,config,status,next_run_at,last_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (strategy_id, user_id, "dca", "v1", config, "stopped", None, None, created, created))
+        self.connection.execute("INSERT OR IGNORE INTO strategy_versions(strategy_id,version,config,created_at,created_by) VALUES (?,?,?,?,?)", (strategy_id, "v1", config, created, user_id))
 
     def create_user(self, email: str, password: str, invite_code: str) -> dict[str, Any]:
         email = email.strip().lower()
@@ -270,6 +282,7 @@ class ConsoleStore:
                 "INSERT INTO agent_configs VALUES (?,?,?,?,?,?,?)",
                 (user_id, "100.00", "daily", "stopped", None, None, created),
             )
+            self._ensure_legacy_strategy(user_id, "100.00", "daily", created)
             self.connection.execute(
                 "INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)",
                 (user_id, "10000.00", "0", "0", "10000.00", "0", created),
@@ -298,6 +311,7 @@ class ConsoleStore:
             self.connection.execute("INSERT INTO console_users VALUES (?,?,?,?,?)", (user_id, email, hash_password(password), "admin", created))
             self.connection.execute("INSERT INTO sim_accounts VALUES (?,?,?,?,?)", (user_id, "10000.00", "0", "10000.00", created))
             self.connection.execute("INSERT INTO agent_configs VALUES (?,?,?,?,?,?,?)", (user_id, "100.00", "daily", "stopped", None, None, created))
+            self._ensure_legacy_strategy(user_id, "100.00", "daily", created)
             self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, "10000.00", "0", "0", "10000.00", "0", created))
             self.audit(user_id, "admin_created", {})
         return self.get_user(user_id)  # type: ignore[return-value]
@@ -521,12 +535,32 @@ class ConsoleStore:
     def set_strategy_status(self, user_id: str, strategy_id: str, status: str) -> dict[str, Any]:
         if status not in {"running", "stopped"}:
             raise ValueError("invalid strategy status")
-        if not self.strategy(user_id, strategy_id):
+        current = self.strategy(user_id, strategy_id)
+        if not current:
             raise ValueError("strategy not found")
+        if current["status"] == "inactive":
+            raise ValueError("inactive strategy must be copied before restarting")
         updated = iso(now())
         with self.connection:
             self.connection.execute("UPDATE strategy_instances SET status=?, next_run_at=?, updated_at=? WHERE user_id=? AND strategy_id=?", (status, updated if status == "running" else None, updated, user_id, strategy_id))
         return self.strategy(user_id, strategy_id)  # type: ignore[return-value]
+
+    def deactivate_strategy(self, user_id: str, strategy_id: str) -> dict[str, Any]:
+        strategy = self.strategy(user_id, strategy_id)
+        if not strategy:
+            raise ValueError("strategy not found")
+        if strategy["status"] == "running":
+            raise ValueError("stop strategy before deactivating it")
+        updated = iso(now())
+        with self.connection:
+            self.connection.execute("UPDATE strategy_instances SET status='inactive', next_run_at=NULL, updated_at=? WHERE user_id=? AND strategy_id=?", (updated, user_id, strategy_id))
+        return self.strategy(user_id, strategy_id)  # type: ignore[return-value]
+
+    def copy_strategy(self, user_id: str, strategy_id: str) -> dict[str, Any]:
+        source = self.strategy(user_id, strategy_id)
+        if not source:
+            raise ValueError("strategy not found")
+        return self.create_strategy(user_id, source["strategy_type"], dict(source["config"]))
 
     def strategy_signals(self, user_id: str, strategy_id: str) -> list[dict[str, Any]]:
         rows = self.connection.execute("SELECT s.*, r.allowed AS risk_allowed, r.rule AS risk_rule, r.threshold AS risk_threshold, r.actual AS risk_actual FROM strategy_signals AS s LEFT JOIN risk_decisions AS r ON r.signal_id=s.signal_id WHERE s.user_id=? AND s.strategy_id=? ORDER BY s.created_at DESC LIMIT 100", (user_id, strategy_id)).fetchall()
