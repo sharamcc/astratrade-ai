@@ -260,6 +260,33 @@ class ConsoleTests(unittest.TestCase):
         self.assertIsNotNone(eth)
         self.assertGreater(Decimal(eth["quantity"]), Decimal("0"))
 
+    def test_grid_api_flow_triggers_level_and_pauses_outside_range(self):
+        cookie = self.register()
+        created = self.api.handle(Request("POST", "/v1/strategies", cookie=cookie, csrf_token=self.csrf_token, body={"strategy_type": "grid", "config": {"budget_usdt": "20", "frequency": "daily", "lower_price": "50000", "upper_price": "70000", "grid_count": 4}}))
+        strategy_id = created.body["strategy_id"]
+        with patch.dict("os.environ", {"ASTRA_SIM_PRICE": "60000"}):
+            first = self.api.handle(Request("POST", f"/v1/strategies/{strategy_id}/start", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(first.body["run"]["status"], "skipped")
+        self.store.connection.execute("UPDATE strategy_instances SET next_run_at=? WHERE strategy_id=?", ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), strategy_id))
+        self.store.connection.commit()
+        self.assertEqual(run_due(self.store, Decimal("55000")), 1)
+        self.assertEqual(self.store.strategy_runs(first.body["strategy"]["user_id"], strategy_id)[0]["status"], "filled")
+        self.store.connection.execute("UPDATE strategy_instances SET next_run_at=? WHERE strategy_id=?", ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), strategy_id))
+        self.store.connection.commit()
+        self.assertEqual(run_due(self.store, Decimal("80000")), 1)
+        notices = self.store.notifications(first.body["strategy"]["user_id"])
+        self.assertTrue(any(item["notification_type"] == "strategy_paused_out_of_range" for item in notices))
+
+    def test_portfolio_missing_one_market_keeps_other_signal(self):
+        cookie = self.register()
+        created = self.api.handle(Request("POST", "/v1/strategies", cookie=cookie, csrf_token=self.csrf_token, body={"strategy_type": "portfolio_dca", "config": {"budget_usdt": "100", "frequency": "daily", "allocations": [{"instrument": "BTC-USDT", "weight": "0.7"}, {"instrument": "ETH-USDT", "weight": "0.3"}]}}))
+        strategy_id = created.body["strategy_id"]
+        with patch.dict("os.environ", {"ASTRA_SIM_PRICE": "60000"}), patch("astratrade.console_api.current_market_prices", return_value={"BTC-USDT": Decimal("60000")}):
+            started = self.api.handle(Request("POST", f"/v1/strategies/{strategy_id}/start", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(started.body["run"]["status"], "filled")
+        signals = self.api.handle(Request("GET", f"/v1/strategies/{strategy_id}/signals", cookie=cookie)).body["items"]
+        self.assertEqual({signal["instrument"]: signal["status"] for signal in signals}, {"BTC-USDT": "filled", "ETH-USDT": "skipped"})
+
     def test_admin_overview_is_admin_only(self):
         user_cookie = self.register()
         self.assertEqual(self.api.handle(Request("GET", "/v1/admin/overview", cookie=user_cookie)).status, 403)
