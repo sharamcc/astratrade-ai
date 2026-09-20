@@ -54,10 +54,12 @@ def build_server():
 
     repository = Repository(sqlite3.connect(db_path, check_same_thread=False, timeout=30))
     product = ConsoleStore(sqlite3.connect(db_path, check_same_thread=False, timeout=30))
-    test_user_id = os.environ.get("ASTRA_TEST_USER_ID", "test-user")
+    test_user_id = os.environ.get("ASTRA_TEST_USER_ID")
     if mode == "test":
-        repository.save_user(User(test_user_id, "test-user@localhost", risk_confirmed=True))
-        product.ensure_legacy_user(test_user_id, "test-user@localhost")
+        if test_user_id:
+            test_user_email = os.environ.get("ASTRA_TEST_USER_EMAIL", "test-user@localhost")
+            repository.save_user(User(test_user_id, test_user_email, risk_confirmed=True))
+            product.ensure_legacy_user(test_user_id, test_user_email)
         client = TestOAuthClient()
         protector = TestTokenProtector()
     else:
