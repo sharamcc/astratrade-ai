@@ -1,0 +1,2 @@
+# Runtime dependency for authenticated token-at-rest encryption.
+cryptography>=42.0.0
