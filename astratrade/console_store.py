@@ -194,6 +194,19 @@ class ConsoleStore:
             );
             CREATE INDEX IF NOT EXISTS idx_risk_decisions_user_created
                 ON risk_decisions(user_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS strategy_risk_decisions (
+                decision_id TEXT PRIMARY KEY,
+                signal_id TEXT NOT NULL REFERENCES strategy_signals(signal_id),
+                user_id TEXT NOT NULL,
+                allowed INTEGER NOT NULL,
+                rule TEXT NOT NULL,
+                threshold TEXT,
+                actual TEXT,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_risk_decisions_user_created
+                ON strategy_risk_decisions(user_id, created_at DESC);
             CREATE TABLE IF NOT EXISTS portfolio_allocations (
                 strategy_id TEXT NOT NULL,
                 strategy_version TEXT NOT NULL,
@@ -631,7 +644,7 @@ class ConsoleStore:
         return self.create_strategy(user_id, source["strategy_type"], dict(source["config"]))
 
     def strategy_signals(self, user_id: str, strategy_id: str) -> list[dict[str, Any]]:
-        rows = self.connection.execute("SELECT s.*, r.allowed AS risk_allowed, r.rule AS risk_rule, r.threshold AS risk_threshold, r.actual AS risk_actual FROM strategy_signals AS s LEFT JOIN risk_decisions AS r ON r.signal_id=s.signal_id WHERE s.user_id=? AND s.strategy_id=? ORDER BY s.created_at DESC LIMIT 100", (user_id, strategy_id)).fetchall()
+        rows = self.connection.execute("SELECT s.*, r.allowed AS risk_allowed, r.rule AS risk_rule, r.threshold AS risk_threshold, r.actual AS risk_actual FROM strategy_signals AS s LEFT JOIN strategy_risk_decisions AS r ON r.signal_id=s.signal_id WHERE s.user_id=? AND s.strategy_id=? ORDER BY s.created_at DESC LIMIT 100", (user_id, strategy_id)).fetchall()
         return [dict(row) for row in rows]
 
     def strategy_runs(self, user_id: str, strategy_id: str) -> list[dict[str, Any]]:
@@ -733,7 +746,7 @@ class ConsoleStore:
         return {"status": final_status, "execution_key": execution_key, "signals": results}
 
     def _record_risk_decision(self, user_id: str, signal_id: str, allowed: bool, reason: str, threshold: Any, actual: Any) -> None:
-        self.connection.execute("INSERT INTO risk_decisions(decision_id,signal_id,user_id,allowed,rule,threshold,actual,reason,reasons,estimated_risk,estimated_notional,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", ("risk_" + secrets.token_urlsafe(10), signal_id, user_id, 1 if allowed else 0, "strategy_simulation_guard", str(threshold) if threshold is not None else None, str(actual) if actual is not None else None, reason, reason, str(actual) if actual is not None else "0", str(threshold) if threshold is not None else "0", iso(now())))
+        self.connection.execute("INSERT INTO strategy_risk_decisions(decision_id,signal_id,user_id,allowed,rule,threshold,actual,reason,created_at) VALUES (?,?,?,?,?,?,?,?,?)", ("risk_" + secrets.token_urlsafe(10), signal_id, user_id, 1 if allowed else 0, "strategy_simulation_guard", str(threshold) if threshold is not None else None, str(actual) if actual is not None else None, reason, iso(now())))
 
     def _record_strategy_performance_snapshot(self, user_id: str, strategy_id: str, price: Decimal, execution_key: str, created_at: str, market_prices: Optional[dict[str, Decimal]] = None) -> None:
         account = self.connection.execute("SELECT cash_usdt, btc, initial_cash_usdt FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()
