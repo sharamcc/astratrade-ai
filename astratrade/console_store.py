@@ -86,6 +86,16 @@ class ConsoleStore:
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sim_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                cash_usdt TEXT NOT NULL,
+                btc TEXT NOT NULL,
+                price TEXT NOT NULL,
+                equity_usdt TEXT NOT NULL,
+                pnl_usdt TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS console_audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT,
@@ -93,6 +103,16 @@ class ConsoleStore:
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT INTO sim_snapshots(user_id, cash_usdt, btc, price, equity_usdt, pnl_usdt, created_at)
+            SELECT a.user_id, a.cash_usdt, a.btc, '0', a.cash_usdt, '0', a.updated_at
+            FROM sim_accounts AS a
+            WHERE NOT EXISTS (
+                SELECT 1 FROM sim_snapshots AS s WHERE s.user_id = a.user_id
+            )
             """
         )
         self.connection.commit()
@@ -132,6 +152,10 @@ class ConsoleStore:
                 "INSERT INTO agent_configs VALUES (?,?,?,?,?,?,?)",
                 (user_id, "100.00", "daily", "stopped", None, None, created),
             )
+            self.connection.execute(
+                "INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)",
+                (user_id, "10000.00", "0", "0", "10000.00", "0", created),
+            )
             self.audit(user_id, "user_registered", {"invite_created_by": invite["created_by"]})
         return self.get_user(user_id)  # type: ignore[return-value]
 
@@ -156,6 +180,7 @@ class ConsoleStore:
             self.connection.execute("INSERT INTO console_users VALUES (?,?,?,?,?)", (user_id, email, hash_password(password), "admin", created))
             self.connection.execute("INSERT INTO sim_accounts VALUES (?,?,?,?,?)", (user_id, "10000.00", "0", "10000.00", created))
             self.connection.execute("INSERT INTO agent_configs VALUES (?,?,?,?,?,?,?)", (user_id, "100.00", "daily", "stopped", None, None, created))
+            self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, "10000.00", "0", "0", "10000.00", "0", created))
             self.audit(user_id, "admin_created", {})
         return self.get_user(user_id)  # type: ignore[return-value]
 
@@ -169,6 +194,7 @@ class ConsoleStore:
             )
             self.connection.execute("INSERT OR IGNORE INTO sim_accounts VALUES (?,?,?,?,?)", (user_id, "10000.00", "0", "10000.00", iso(now())))
             self.connection.execute("INSERT OR IGNORE INTO agent_configs VALUES (?,?,?,?,?,?,?)", (user_id, "100.00", "daily", "stopped", None, None, iso(now())))
+            self.connection.execute("INSERT OR IGNORE INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, "10000.00", "0", "0", "10000.00", "0", iso(now())))
 
     def authenticate(self, email: str, password: str) -> Optional[dict[str, Any]]:
         user = self.get_user_by_email(email)
@@ -251,9 +277,13 @@ class ConsoleStore:
         quantity = (budget / price).quantize(Decimal("0.00000001"))
         order_id = "sim_" + secrets.token_urlsafe(10)
         created = iso(now())
+        next_btc = Decimal(account["btc"]) + quantity
+        next_cash = available - budget - fee
+        equity = next_cash + next_btc * price
         with self.connection:
-            self.connection.execute("UPDATE sim_accounts SET cash_usdt=?, btc=?, updated_at=? WHERE user_id=?", (str(available - budget - fee), str(Decimal(account["btc"]) + quantity), created, user_id))
+            self.connection.execute("UPDATE sim_accounts SET cash_usdt=?, btc=?, updated_at=? WHERE user_id=?", (str(next_cash), str(next_btc), created, user_id))
             self.connection.execute("INSERT INTO sim_orders VALUES (?,?,?,?,?,?,?,?,?,?,?)", (order_id, execution_key, user_id, "BTC-USDT", "buy", str(quantity), str(price), str(budget), str(fee), "filled", created))
+            self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, str(next_cash), str(next_btc), str(price), str(equity), str(equity - Decimal(account["initial_cash_usdt"])), created))
             self.audit(user_id, "simulation_order_filled", {"order_id": order_id, "price": str(price), "quantity": str(quantity), "fee": str(fee)})
         return dict(self.connection.execute("SELECT * FROM sim_orders WHERE order_id=?", (order_id,)).fetchone())
 
@@ -263,7 +293,10 @@ class ConsoleStore:
         btc = Decimal(account["btc"])
         cash = Decimal(account["cash_usdt"])
         equity = cash + btc * price
-        return {"mode": "simulation", "instrument": "BTC-USDT", "price": str(price), "cash_usdt": str(cash), "btc": str(btc), "equity_usdt": str(equity), "pnl_usdt": str(equity - Decimal(account["initial_cash_usdt"])), "agent": self.agent(user_id), "recent_orders": orders}
+        history = [dict(row) for row in self.connection.execute("SELECT cash_usdt, btc, price, equity_usdt, pnl_usdt, created_at FROM sim_snapshots WHERE user_id=? ORDER BY id DESC LIMIT 30", (user_id,)).fetchall()]
+        history.reverse()
+        risk_events = [dict(row) for row in self.connection.execute("SELECT payload, created_at FROM console_audit WHERE user_id=? AND event_type='risk_blocked' ORDER BY id DESC LIMIT 5", (user_id,)).fetchall()]
+        return {"mode": "simulation", "instrument": "BTC-USDT", "price": str(price), "cash_usdt": str(cash), "btc": str(btc), "equity_usdt": str(equity), "pnl_usdt": str(equity - Decimal(account["initial_cash_usdt"])), "agent": self.agent(user_id), "recent_orders": orders, "equity_history": history, "risk_events": [{"payload": json.loads(row["payload"]), "created_at": row["created_at"]} for row in risk_events]}
 
     def orders(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute("SELECT * FROM sim_orders WHERE user_id=? ORDER BY created_at DESC LIMIT ?", (user_id, min(max(limit, 1), 100))).fetchall()]

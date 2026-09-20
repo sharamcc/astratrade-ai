@@ -75,6 +75,21 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(Decimal(first.body["run"]["fee_usdt"]), Decimal("0.10000000"))
         self.assertEqual(len(self.store.orders(user_id)), 1)
 
+    def test_dashboard_returns_equity_history_and_explains_risk_block(self):
+        cookie = self.register()
+        user_id = self.api.handle(Request("GET", "/v1/auth/me", cookie=cookie)).body["user_id"]
+        with patch.dict("os.environ", {"ASTRA_SIM_PRICE": "60000"}):
+            started = self.api.handle(Request("POST", "/v1/agent/start", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(started.body["run"]["status"], "filled")
+        self.store.connection.execute("UPDATE sim_accounts SET cash_usdt='0' WHERE user_id=?", (user_id,))
+        self.store.connection.commit()
+        with patch.dict("os.environ", {"ASTRA_SIM_PRICE": "60000"}):
+            blocked = self.api.handle(Request("POST", "/v1/agent/start", cookie=cookie, csrf_token=self.csrf_token))
+            dashboard = self.api.handle(Request("GET", "/v1/dashboard", cookie=cookie))
+        self.assertEqual(blocked.body["run"]["status"], "risk_blocked")
+        self.assertGreaterEqual(len(dashboard.body["equity_history"]), 2)
+        self.assertEqual(dashboard.body["risk_events"][0]["payload"]["reason"], "insufficient_cash_or_invalid_price")
+
     def test_csrf_password_change_and_session_revocation(self):
         cookie = self.register()
         blocked = self.api.handle(Request("POST", "/v1/agent/stop", cookie=cookie))
