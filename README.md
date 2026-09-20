@@ -7,6 +7,22 @@
 一个自包含的 Python 交易 Agent 原型：读取 `trading_plan.json`，每 5 分钟扫描 OKX 公共行情，
 按交易计划中的触发条件（基于 30m 收线确认）评估并执行。默认以只读/确认模式运行，供策略验证和小额测试使用；不构成投资建议或收益承诺。
 
+## 多用户模拟控制台
+
+AstraTrade AI 现在包含一个同域 React 控制台，用于邀请码用户验证 BTC/USDT 保守定投 Agent：
+
+```bash
+python3 -m pip install -r requirements.txt
+cd web && npm install && npm run build && cd ..
+ASTRA_RUN_MODE=test \
+ASTRA_DB_PATH=/tmp/astratrade-ai.sqlite3 \
+ASTRA_CALLBACK_REDIRECT_URI=https://test.invalid/oauth/callback \
+ASTRA_SIM_PRICE=60000 \
+python3 serve.py
+```
+
+浏览器访问 `http://127.0.0.1:8080`。生产/测试服使用 `deploy/` 下的 systemd Worker 与 Caddy 配置；先用 `bootstrap_admin.py` 创建管理员，再由管理员生成邀请码。该控制台只产生模拟订单，不读取真实资产、不执行实盘交易。
+
 ## 运行
 
 ```bash

@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 
 from astratrade.api import ApplicationAPI
 from astratrade.auth import SessionAuth
+from astratrade.console_api import ConsoleAPI
+from astratrade.console_store import ConsoleStore
 from astratrade.domain import OAuthTokenSet, User
 from astratrade.http_server import create_server
 from astratrade.oauth import OAuthService
@@ -50,10 +52,12 @@ def build_server():
     if not callback_uri:
         raise RuntimeError("ASTRA_CALLBACK_REDIRECT_URI is required")
 
-    repository = Repository(sqlite3.connect(db_path))
+    repository = Repository(sqlite3.connect(db_path, check_same_thread=False, timeout=30))
+    product = ConsoleStore(sqlite3.connect(db_path, check_same_thread=False, timeout=30))
     test_user_id = os.environ.get("ASTRA_TEST_USER_ID", "test-user")
     if mode == "test":
         repository.save_user(User(test_user_id, "test-user@localhost", risk_confirmed=True))
+        product.ensure_legacy_user(test_user_id, "test-user@localhost")
         client = TestOAuthClient()
         protector = TestTokenProtector()
     else:
@@ -71,7 +75,9 @@ def build_server():
     )
     port = int(os.environ.get("ASTRA_PORT", "8080"))
     host = os.environ.get("ASTRA_HOST", "127.0.0.1")
-    return create_server(api, SessionAuth(repository).resolve, host=host, port=port)
+    sessions = SessionAuth(repository)
+    static_dir = os.environ.get("ASTRA_STATIC_DIR", os.path.join(os.path.dirname(__file__), "web", "dist"))
+    return create_server(ConsoleAPI(product, api, sessions), sessions.resolve, host=host, port=port, static_dir=static_dir)
 
 
 if __name__ == "__main__":

@@ -6,5 +6,10 @@
 monitor.out
 .eth_usdt_execution_log.jsonl
 .eth_usdt_execution_state.json
+
+web/node_modules/
+web/dist/
 __pycache__/
-*.py[cod]
+*.pyc
+.pytest_cache/
+.DS_Store

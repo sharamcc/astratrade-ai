@@ -1,0 +1,10 @@
+astratrade-ai-dev.example.com {
+    encode gzip
+    reverse_proxy 127.0.0.1:8080
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy same-origin
+        Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'"
+    }
+}

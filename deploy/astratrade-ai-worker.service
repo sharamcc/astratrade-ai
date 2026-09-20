@@ -1,0 +1,21 @@
+[Unit]
+Description=AstraTrade AI simulation worker
+After=network.target astratrade-ai.service
+
+[Service]
+Type=simple
+User=astratrade
+Group=astratrade
+WorkingDirectory=/opt/astratrade-ai/current
+EnvironmentFile=/etc/astratrade-ai/astratrade-ai.env
+ExecStart=/usr/bin/python3 /opt/astratrade-ai/current/worker.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/astratrade-ai
+
+[Install]
+WantedBy=multi-user.target

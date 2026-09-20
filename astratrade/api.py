@@ -21,12 +21,16 @@ class Request:
     user_id: Optional[str] = None
     body: Mapping[str, Any] | None = None
     query: Mapping[str, str] | None = None
+    authorization: Optional[str] = None
+    cookie: Optional[str] = None
+    origin: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class Response:
     status: int
     body: Mapping[str, Any]
+    headers: Mapping[str, str] | None = None
 
 
 class ApplicationAPI:
