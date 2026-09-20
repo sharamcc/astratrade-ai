@@ -1,0 +1,16 @@
+[Unit]
+Description=AstraTrade AI SQLite backup
+After=astratrade-ai.service
+
+[Service]
+Type=oneshot
+User=astratrade
+Group=astratrade
+WorkingDirectory=/opt/astratrade-ai/current
+EnvironmentFile=/etc/astratrade-ai/astratrade-ai.env
+ExecStart=/usr/bin/python3 /opt/astratrade-ai/current/backup_db.py
+ReadWritePaths=/var/backups/astratrade-ai
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true

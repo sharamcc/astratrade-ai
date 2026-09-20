@@ -45,9 +45,11 @@ def create_server(
                 authorization=self.headers.get("Authorization"),
                 cookie=self.headers.get("Cookie"),
                 origin=self.headers.get("Origin"),
+                csrf_token=self.headers.get("X-CSRF-Token"),
+                remote_addr=self.client_address[0],
             )
 
-        def _write_response(self, status: int, body: dict, headers: dict | None = None) -> None:
+        def _write_response(self, status: int, body: dict, headers: dict | None = None, cookies: tuple[str, ...] = ()) -> None:
             encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
             if status == 204:
                 encoded = b""
@@ -56,6 +58,8 @@ def create_server(
             self.send_header("Content-Length", str(len(encoded)))
             for name, value in (headers or {}).items():
                 self.send_header(name, value)
+            for cookie in cookies:
+                self.send_header("Set-Cookie", cookie)
             self.end_headers()
             if status != 204:
                 self.wfile.write(encoded)
@@ -72,7 +76,7 @@ def create_server(
                 self._write_static(static_root / "index.html", cache=False)
                 return
             response = api.handle(self._request())
-            self._write_response(response.status, dict(response.body), dict(response.headers or {}))
+            self._write_response(response.status, dict(response.body), dict(response.headers or {}), response.cookies)
 
         def _write_static(self, path: Path, cache: bool) -> None:
             if not path.is_file():
@@ -97,7 +101,7 @@ def create_server(
                 self._write_response(400, {"error": "invalid_json"})
                 return
             response = api.handle(self._request(body))
-            self._write_response(response.status, dict(response.body), dict(response.headers or {}))
+            self._write_response(response.status, dict(response.body), dict(response.headers or {}), response.cookies)
 
         def do_PUT(self) -> None:  # noqa: N802
             self._handle_json_mutation()
@@ -116,7 +120,7 @@ def create_server(
                 self._write_response(400, {"error": "invalid_json"})
                 return
             response = api.handle(self._request(body))
-            self._write_response(response.status, dict(response.body), dict(response.headers or {}))
+            self._write_response(response.status, dict(response.body), dict(response.headers or {}), response.cookies)
 
         def log_message(self, format: str, *args: object) -> None:
             return

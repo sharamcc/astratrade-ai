@@ -177,6 +177,18 @@ class ConsoleStore:
         from .passwords import verify_password
         return user if verify_password(user["password_hash"], password) else None
 
+    def change_password(self, user_id: str, current_password: str, new_password: str) -> None:
+        user = self.get_user(user_id)
+        if not user:
+            raise ValueError("user not found")
+        from .passwords import verify_password
+        if not verify_password(user["password_hash"], current_password):
+            raise ValueError("current password is incorrect")
+        encoded = hash_password(new_password)
+        with self.connection:
+            self.connection.execute("UPDATE console_users SET password_hash=? WHERE user_id=?", (encoded, user_id))
+            self.audit(user_id, "password_changed", {})
+
     def create_invite(self, created_by: str, max_uses: int = 1, ttl_hours: int = 168) -> tuple[str, dict[str, Any]]:
         if max_uses < 1 or max_uses > 100:
             raise ValueError("max_uses must be between 1 and 100")

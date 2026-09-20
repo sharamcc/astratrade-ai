@@ -24,6 +24,8 @@ class Request:
     authorization: Optional[str] = None
     cookie: Optional[str] = None
     origin: Optional[str] = None
+    csrf_token: Optional[str] = None
+    remote_addr: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,7 @@ class Response:
     status: int
     body: Mapping[str, Any]
     headers: Mapping[str, str] | None = None
+    cookies: tuple[str, ...] = ()
 
 
 class ApplicationAPI:

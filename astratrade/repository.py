@@ -491,3 +491,9 @@ class Repository:
             "UPDATE sessions SET revoked = 1 WHERE token_hash = ?", (token_hash,)
         )
         self.connection.commit()
+
+    def revoke_user_sessions(self, user_id: str) -> None:
+        self.connection.execute(
+            "UPDATE sessions SET revoked = 1 WHERE user_id = ?", (user_id,)
+        )
+        self.connection.commit()
