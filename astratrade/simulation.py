@@ -23,7 +23,15 @@ def current_btc_price() -> Decimal:
 
 def run_once(store: ConsoleStore, user_id: str, price: Decimal | None = None) -> dict:
     agent = store.agent(user_id)
-    price = price or current_btc_price()
+    if price is None:
+        try:
+            price = current_btc_price()
+        except Exception:
+            result = store.record_market_price_failure(user_id)
+            interval = timedelta(days=7 if agent["frequency"] == "weekly" else 1)
+            store.connection.execute("UPDATE agent_configs SET last_run_at=?, next_run_at=?, updated_at=? WHERE user_id=?", (iso(now()), iso(now() + interval), iso(now()), user_id))
+            store.connection.commit()
+            return result
     execution_key = f"{user_id}:{agent['next_run_at']}"
     result = store.run_simulation(user_id, price, execution_key)
     interval = timedelta(days=7 if agent["frequency"] == "weekly" else 1)

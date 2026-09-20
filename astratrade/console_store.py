@@ -307,6 +307,11 @@ class ConsoleStore:
             self.notify(user_id, "order_filled", "模拟订单已成交", f"BTC/USDT 买入 {quantity} BTC，手续费 {fee} USDT。", "order", order_id, f"order:{order_id}")
         return dict(self.connection.execute("SELECT * FROM sim_orders WHERE order_id=?", (order_id,)).fetchone())
 
+    def record_market_price_failure(self, user_id: str, category: str = "market_price_unavailable") -> dict[str, str]:
+        self.audit(user_id, "market_price_stale", {"instrument": "BTC-USDT", "failure_category": category})
+        self.notify(user_id, "market_price_stale", "行情暂不可用", "本次模拟执行已跳过，未扣除余额；行情恢复后将按计划继续。", "agent", user_id, f"market_price:{iso(now())[:16]}")
+        return {"status": "risk_blocked", "reason": "stale_market_price"}
+
     def dashboard(self, user_id: str, price: Decimal) -> dict[str, Any]:
         account = dict(self.connection.execute("SELECT * FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone())
         orders = [dict(row) for row in self.connection.execute("SELECT * FROM sim_orders WHERE user_id=? ORDER BY created_at DESC LIMIT 5", (user_id,)).fetchall()]
@@ -401,6 +406,10 @@ class ConsoleStore:
         for row in rows[0]:
             writer.writerow(row)
         return filename, output.getvalue()
+
+    def export_agent_config(self, user_id: str) -> str:
+        config = self.agent(user_id)
+        return json.dumps({"simulation": True, "instrument": "BTC-USDT", "agent": config}, ensure_ascii=False, indent=2)
 
     def audit_events(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.connection.execute("SELECT event_type, payload, created_at FROM console_audit WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, min(max(limit, 1), 200))).fetchall()

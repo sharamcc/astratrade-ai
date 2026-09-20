@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import secrets
 import hmac
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from http.cookies import SimpleCookie
 from typing import Any, Optional
@@ -88,7 +88,14 @@ class ConsoleAPI:
                 agent = self.product.set_agent_status(user_id, "running", __import__("datetime").datetime.now(__import__("datetime").timezone.utc))
                 self.product.audit(user_id, "agent_started", {"budget_usdt": agent["budget_usdt"], "frequency": agent["frequency"]})
                 self.product.notify(user_id, "agent_started", "Agent 已启动", "模拟 Agent 已启动，并将立即尝试执行一次。", "agent", user_id, f"agent_started:{agent['updated_at']}")
-                result = run_once(self.product, user_id, self._price())
+                try:
+                    price = self._price()
+                    result = run_once(self.product, user_id, price)
+                except Exception:
+                    result = self.product.record_market_price_failure(user_id)
+                    failed_at = datetime.now(timezone.utc)
+                    interval = timedelta(days=7 if agent["frequency"] == "weekly" else 1)
+                    self.product.connection.execute("UPDATE agent_configs SET last_run_at=?, next_run_at=?, updated_at=? WHERE user_id=?", (failed_at.isoformat(), (failed_at + interval).isoformat(), failed_at.isoformat(), user_id))
                 self.product.connection.commit()
                 return Response(200, {"agent": result and self.product.agent(user_id), "run": result})
             if path == "/v1/agent/stop" and method == "POST":
@@ -127,6 +134,11 @@ class ConsoleAPI:
                 return Response(200, {"count": count})
             if method == "GET" and path.startswith("/v1/export/"):
                 export_type = path.rsplit("/", 1)[-1]
+                if export_type == "agent":
+                    content = self.product.export_agent_config(user_id)
+                    self.product.audit(user_id, "data_export_completed", {"export_type": export_type, "row_count": 1})
+                    self.product.connection.commit()
+                    return Response(200, {"filename": "astratrade-agent-config.json", "content_type": "application/json; charset=utf-8", "content": content})
                 filename, content = self.product.export_csv(user_id, export_type)
                 self.product.audit(user_id, "data_export_completed", {"export_type": export_type, "row_count": max(0, content.count("\n") - 1)})
                 self.product.connection.commit()

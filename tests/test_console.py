@@ -129,7 +129,18 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(self.api.handle(Request("POST", "/v1/notifications/read", cookie=cookie, csrf_token=self.csrf_token, body={"notification_id": notice_id})).status, 204)
         export = self.api.handle(Request("GET", "/v1/export/orders", cookie=cookie))
         self.assertIn("order_id", export.body["content"])
+        agent_export = self.api.handle(Request("GET", "/v1/export/agent", cookie=cookie))
+        self.assertIn('"simulation": true', agent_export.body["content"])
         self.assertEqual(self.api.handle(Request("GET", "/v1/orders/other", cookie=cookie)).status, 404)
+
+    def test_market_price_failure_skips_execution_and_notifies(self):
+        cookie = self.register()
+        with patch("astratrade.console_api.current_btc_price", side_effect=RuntimeError("provider unavailable")):
+            started = self.api.handle(Request("POST", "/v1/agent/start", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(started.body["run"]["reason"], "stale_market_price")
+        self.assertEqual(self.store.orders(started.body["agent"]["user_id"]), [])
+        notifications = self.api.handle(Request("GET", "/v1/notifications", cookie=cookie))
+        self.assertTrue(any(item["notification_type"] == "market_price_stale" for item in notifications.body["items"]))
 
     def test_admin_overview_is_admin_only(self):
         user_cookie = self.register()
