@@ -8,7 +8,7 @@ from astratrade.api import ApplicationAPI, Request
 from astratrade.auth import SessionAuth
 from astratrade.console_api import ConsoleAPI
 from astratrade.console_store import ConsoleStore
-from astratrade.domain import OAuthTokenSet
+from astratrade.domain import OAuthTokenSet, User
 from astratrade.oauth import OAuthService
 from astratrade.repository import Repository
 
@@ -107,6 +107,37 @@ class ConsoleTests(unittest.TestCase):
         self.assertEqual(refreshed.status, 200)
         self.assertEqual(len(refreshed.cookies), 1)
         self.assertTrue(refreshed.cookies[0].startswith("astra_csrf="))
+
+    def test_phase4_product_endpoints_are_scoped_and_explain_execution(self):
+        cookie = self.register()
+        templates = self.api.handle(Request("GET", "/v1/agent/templates", cookie=cookie))
+        self.assertEqual(templates.status, 200)
+        self.assertEqual({item["template_id"] for item in templates.body["items"]}, {"small_trial", "conservative", "frequent_small"})
+        saved = self.api.handle(Request("PUT", "/v1/agent", cookie=cookie, csrf_token=self.csrf_token, body={"budget_usdt": 20, "frequency": "weekly", "template_id": "small_trial"}))
+        self.assertEqual(saved.body["budget_usdt"], "20")
+        with patch.dict("os.environ", {"ASTRA_SIM_PRICE": "60000"}):
+            started = self.api.handle(Request("POST", "/v1/agent/start", cookie=cookie, csrf_token=self.csrf_token))
+        order_id = started.body["run"]["order_id"]
+        detail = self.api.handle(Request("GET", f"/v1/orders/{order_id}", cookie=cookie))
+        self.assertEqual(detail.body["execution_reason"], "Agent 按已保存的定投配置执行模拟订单")
+        self.assertEqual(detail.body["risk_decision"], "passed")
+        analytics = self.api.handle(Request("GET", "/v1/analytics", cookie=cookie))
+        self.assertEqual(analytics.body["order_count"], 1)
+        notifications = self.api.handle(Request("GET", "/v1/notifications", cookie=cookie))
+        self.assertGreaterEqual(notifications.body["unread_count"], 2)
+        notice_id = notifications.body["items"][0]["notification_id"]
+        self.assertEqual(self.api.handle(Request("POST", "/v1/notifications/read", cookie=cookie, csrf_token=self.csrf_token, body={"notification_id": notice_id})).status, 204)
+        export = self.api.handle(Request("GET", "/v1/export/orders", cookie=cookie))
+        self.assertIn("order_id", export.body["content"])
+        self.assertEqual(self.api.handle(Request("GET", "/v1/orders/other", cookie=cookie)).status, 404)
+
+    def test_admin_overview_is_admin_only(self):
+        user_cookie = self.register()
+        self.assertEqual(self.api.handle(Request("GET", "/v1/admin/overview", cookie=user_cookie)).status, 403)
+        self.repository.save_user(User(self.admin["user_id"], self.admin["email"], risk_confirmed=True))
+        login = self.api.handle(Request("POST", "/v1/auth/login", body={"email": "admin@example.com", "password": "correct horse battery staple!"}))
+        admin_cookie = "; ".join(cookie.split(";", 1)[0] for cookie in login.cookies)
+        self.assertEqual(self.api.handle(Request("GET", "/v1/admin/overview", cookie=admin_cookie)).status, 200)
 
     def test_login_rate_limit_and_failure_audit(self):
         for _ in range(5):

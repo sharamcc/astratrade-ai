@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import csv
+import io
 import json
 import secrets
 import sqlite3
@@ -103,6 +105,21 @@ class ConsoleStore:
                 payload TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS console_notifications (
+                notification_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                notification_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                entity_type TEXT,
+                entity_id TEXT,
+                dedupe_key TEXT,
+                read_at TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, dedupe_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_console_notifications_user_created
+                ON console_notifications(user_id, created_at DESC);
             """
         )
         self.connection.execute(
@@ -273,6 +290,7 @@ class ConsoleStore:
         available = Decimal(account["cash_usdt"])
         if price <= 0 or budget + fee > available:
             self.audit(user_id, "risk_blocked", {"reason": "insufficient_cash_or_invalid_price", "budget": str(budget), "price": str(price)})
+            self.notify(user_id, "risk_blocked", "模拟执行被拦截", "可用余额不足，或行情价格无效，系统未生成订单。", "agent", user_id, f"risk:{execution_key}")
             return {"status": "risk_blocked", "reason": "insufficient_cash_or_invalid_price"}
         quantity = (budget / price).quantize(Decimal("0.00000001"))
         order_id = "sim_" + secrets.token_urlsafe(10)
@@ -285,6 +303,8 @@ class ConsoleStore:
             self.connection.execute("INSERT INTO sim_orders VALUES (?,?,?,?,?,?,?,?,?,?,?)", (order_id, execution_key, user_id, "BTC-USDT", "buy", str(quantity), str(price), str(budget), str(fee), "filled", created))
             self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, str(next_cash), str(next_btc), str(price), str(equity), str(equity - Decimal(account["initial_cash_usdt"])), created))
             self.audit(user_id, "simulation_order_filled", {"order_id": order_id, "price": str(price), "quantity": str(quantity), "fee": str(fee)})
+            self.audit(user_id, "simulation_snapshot_created", {"equity_usdt": str(equity), "pnl_usdt": str(equity - Decimal(account["initial_cash_usdt"]))})
+            self.notify(user_id, "order_filled", "模拟订单已成交", f"BTC/USDT 买入 {quantity} BTC，手续费 {fee} USDT。", "order", order_id, f"order:{order_id}")
         return dict(self.connection.execute("SELECT * FROM sim_orders WHERE order_id=?", (order_id,)).fetchone())
 
     def dashboard(self, user_id: str, price: Decimal) -> dict[str, Any]:
@@ -301,9 +321,93 @@ class ConsoleStore:
     def orders(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute("SELECT * FROM sim_orders WHERE user_id=? ORDER BY created_at DESC LIMIT ?", (user_id, min(max(limit, 1), 100))).fetchall()]
 
+    def order_detail(self, user_id: str, order_id: str) -> Optional[dict[str, Any]]:
+        row = self.connection.execute("SELECT * FROM sim_orders WHERE user_id=? AND order_id=?", (user_id, order_id)).fetchone()
+        if not row:
+            return None
+        order = dict(row)
+        event = self.connection.execute("SELECT payload, created_at FROM console_audit WHERE user_id=? AND event_type='simulation_order_filled' AND json_extract(payload, '$.order_id')=? ORDER BY id DESC LIMIT 1", (user_id, order_id)).fetchone()
+        snapshot = self.connection.execute("SELECT cash_usdt, btc, equity_usdt, pnl_usdt FROM sim_snapshots WHERE user_id=? AND created_at=? ORDER BY id DESC LIMIT 1", (user_id, order["created_at"])).fetchone()
+        order["execution_reason"] = "Agent 按已保存的定投配置执行模拟订单"
+        order["risk_decision"] = "passed"
+        order["audit"] = {"payload": json.loads(event["payload"]), "created_at": event["created_at"]} if event else None
+        order["account_after"] = dict(snapshot) if snapshot else None
+        return order
+
+    @staticmethod
+    def strategy_templates() -> list[dict[str, Any]]:
+        return [
+            {"template_id": "small_trial", "name": "小额试运行", "budget_usdt": "20", "frequency": "weekly", "description": "适合首次体验，低频观察模拟结果。"},
+            {"template_id": "conservative", "name": "保守定投", "budget_usdt": "100", "frequency": "weekly", "description": "默认推荐，节奏稳定，资金占用较低。"},
+            {"template_id": "frequent_small", "name": "高频小额", "budget_usdt": "100", "frequency": "daily", "description": "适合观察每日执行和手续费影响。"},
+        ]
+
+    def analytics(self, user_id: str, price: Decimal) -> dict[str, Any]:
+        account = self.connection.execute("SELECT * FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()
+        if not account:
+            raise ValueError("simulation account not found")
+        cash = Decimal(account["cash_usdt"])
+        btc = Decimal(account["btc"])
+        equity = cash + btc * price
+        fees = self.connection.execute("SELECT COALESCE(SUM(CAST(fee_usdt AS REAL)), 0) AS total FROM sim_orders WHERE user_id=? AND status='filled'", (user_id,)).fetchone()["total"]
+        orders = self.connection.execute("SELECT COUNT(*) AS total FROM sim_orders WHERE user_id=?", (user_id,)).fetchone()["total"]
+        risks = self.connection.execute("SELECT COUNT(*) AS total FROM console_audit WHERE user_id=? AND event_type='risk_blocked'", (user_id,)).fetchone()["total"]
+        return {"equity_usdt": str(equity), "pnl_usdt": str(equity - Decimal(account["initial_cash_usdt"])), "fees_usdt": f"{Decimal(str(fees)):.8f}", "order_count": orders, "risk_block_count": risks, "btc": str(btc), "cash_usdt": str(cash), "price": str(price)}
+
+    def notifications(self, user_id: str, unread_only: bool = False, limit: int = 50) -> list[dict[str, Any]]:
+        condition = " AND read_at IS NULL" if unread_only else ""
+        rows = self.connection.execute(f"SELECT * FROM console_notifications WHERE user_id=?{condition} ORDER BY created_at DESC LIMIT ?", (user_id, min(max(limit, 1), 100))).fetchall()
+        return [dict(row) for row in rows]
+
+    def unread_notification_count(self, user_id: str) -> int:
+        return self.connection.execute("SELECT COUNT(*) AS total FROM console_notifications WHERE user_id=? AND read_at IS NULL", (user_id,)).fetchone()["total"]
+
+    def mark_notification_read(self, user_id: str, notification_id: str) -> bool:
+        with self.connection:
+            cursor = self.connection.execute("UPDATE console_notifications SET read_at=? WHERE user_id=? AND notification_id=? AND read_at IS NULL", (iso(now()), user_id, notification_id))
+        return cursor.rowcount > 0
+
+    def mark_all_notifications_read(self, user_id: str) -> int:
+        with self.connection:
+            cursor = self.connection.execute("UPDATE console_notifications SET read_at=? WHERE user_id=? AND read_at IS NULL", (iso(now()), user_id))
+        return cursor.rowcount
+
+    def admin_overview(self) -> dict[str, Any]:
+        users = self.connection.execute("SELECT COUNT(*) AS total FROM console_users").fetchone()["total"]
+        active_agents = self.connection.execute("SELECT COUNT(*) AS total FROM agent_configs WHERE status='running'").fetchone()["total"]
+        executions = self.connection.execute("SELECT COUNT(*) AS total FROM sim_orders").fetchone()["total"]
+        filled = self.connection.execute("SELECT COUNT(*) AS total FROM sim_orders WHERE status='filled'").fetchone()["total"]
+        risks = self.connection.execute("SELECT COUNT(*) AS total FROM console_audit WHERE event_type='risk_blocked'").fetchone()["total"]
+        return {"user_count": users, "active_agent_count": active_agents, "execution_count": executions, "filled_order_count": filled, "risk_block_count": risks, "market_price_failure_count": 0}
+
+    def export_csv(self, user_id: str, export_type: str) -> tuple[str, str]:
+        if export_type == "orders":
+            headers = ["order_id", "instrument", "side", "quantity", "price", "notional_usdt", "fee_usdt", "status", "created_at"]
+            rows = [self.orders(user_id, 100)]
+            filename = "astratrade-simulated-orders.csv"
+        elif export_type == "equity":
+            headers = ["cash_usdt", "btc", "price", "equity_usdt", "pnl_usdt", "created_at"]
+            rows = [[dict(row) for row in self.connection.execute("SELECT cash_usdt, btc, price, equity_usdt, pnl_usdt, created_at FROM sim_snapshots WHERE user_id=? ORDER BY id", (user_id,)).fetchall()]]
+            filename = "astratrade-equity-history.csv"
+        elif export_type == "audit":
+            headers = ["event_type", "payload", "created_at"]
+            rows = [self.audit_events(user_id, 200)]
+            filename = "astratrade-audit.csv"
+        else:
+            raise ValueError("unsupported export type")
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows[0]:
+            writer.writerow(row)
+        return filename, output.getvalue()
+
     def audit_events(self, user_id: str, limit: int = 100) -> list[dict[str, Any]]:
         rows = self.connection.execute("SELECT event_type, payload, created_at FROM console_audit WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, min(max(limit, 1), 200))).fetchall()
         return [{"event_type": r["event_type"], "payload": json.loads(r["payload"]), "created_at": r["created_at"]} for r in rows]
 
     def audit(self, user_id: Optional[str], event_type: str, payload: dict[str, Any]) -> None:
         self.connection.execute("INSERT INTO console_audit(user_id,event_type,payload,created_at) VALUES (?,?,?,?)", (user_id, event_type, json.dumps(payload, ensure_ascii=False), iso(now())))
+
+    def notify(self, user_id: str, notification_type: str, title: str, message: str, entity_type: Optional[str], entity_id: Optional[str], dedupe_key: str) -> None:
+        self.connection.execute("INSERT OR IGNORE INTO console_notifications(notification_id,user_id,notification_type,title,message,entity_type,entity_id,dedupe_key,created_at) VALUES (?,?,?,?,?,?,?,?,?)", ("notice_" + secrets.token_urlsafe(10), user_id, notification_type, title, message, entity_type, entity_id, dedupe_key, iso(now())))

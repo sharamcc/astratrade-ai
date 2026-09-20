@@ -73,22 +73,71 @@ class ConsoleAPI:
                 return Response(204, {}, cookies=self._clear_cookies())
             if method == "GET" and path == "/v1/dashboard":
                 return Response(200, self.product.dashboard(user_id, self._price()))
+            if method == "GET" and path == "/v1/analytics":
+                return Response(200, self.product.analytics(user_id, self._price()))
             if path == "/v1/agent" and method == "GET":
                 return Response(200, self.product.agent(user_id))
+            if path == "/v1/agent/templates" and method == "GET":
+                return Response(200, {"items": self.product.strategy_templates()})
             if path == "/v1/agent" and method == "PUT":
-                return Response(200, self.product.save_agent(user_id, Decimal(str(body.get("budget_usdt"))), str(body.get("frequency", "daily"))))
+                result = self.product.save_agent(user_id, Decimal(str(body.get("budget_usdt"))), str(body.get("frequency", "daily")))
+                self.product.audit(user_id, "agent_config_saved", {"budget_usdt": result["budget_usdt"], "frequency": result["frequency"], "template_id": body.get("template_id")})
+                self.product.connection.commit()
+                return Response(200, result)
             if path == "/v1/agent/start" and method == "POST":
                 agent = self.product.set_agent_status(user_id, "running", __import__("datetime").datetime.now(__import__("datetime").timezone.utc))
+                self.product.audit(user_id, "agent_started", {"budget_usdt": agent["budget_usdt"], "frequency": agent["frequency"]})
+                self.product.notify(user_id, "agent_started", "Agent 已启动", "模拟 Agent 已启动，并将立即尝试执行一次。", "agent", user_id, f"agent_started:{agent['updated_at']}")
                 result = run_once(self.product, user_id, self._price())
+                self.product.connection.commit()
                 return Response(200, {"agent": result and self.product.agent(user_id), "run": result})
             if path == "/v1/agent/stop" and method == "POST":
-                return Response(200, self.product.set_agent_status(user_id, "stopped", None))
+                result = self.product.set_agent_status(user_id, "stopped", None)
+                self.product.audit(user_id, "agent_stopped", {})
+                self.product.notify(user_id, "agent_stopped", "Agent 已停止", "后续调度将暂停，现有模拟账户不会被修改。", "agent", user_id, f"agent_stopped:{result['updated_at']}")
+                self.product.connection.commit()
+                return Response(200, result)
+            if method == "GET" and path.startswith("/v1/orders/"):
+                order_id = path.rsplit("/", 1)[-1]
+                detail = self.product.order_detail(user_id, order_id)
+                if not detail:
+                    return self._error(404, "order_not_found", "订单不存在或无权查看")
+                self.product.audit(user_id, "order_detail_viewed", {"order_id": order_id})
+                self.product.connection.commit()
+                return Response(200, detail)
             if method == "GET" and path == "/v1/orders":
                 return Response(200, {"items": self.product.orders(user_id)})
             if method == "GET" and path == "/v1/audit":
                 return Response(200, {"items": self.product.audit_events(user_id)})
+            if method == "GET" and path == "/v1/notifications":
+                unread_only = str((request.query or {}).get("unread", "0")).lower() in {"1", "true", "yes"}
+                return Response(200, {"items": self.product.notifications(user_id, unread_only), "unread_count": self.product.unread_notification_count(user_id)})
+            if method == "POST" and path == "/v1/notifications/read":
+                notification_id = str(body.get("notification_id", ""))
+                if not notification_id:
+                    return self._error(400, "notification_id_required", "通知 ID 不能为空")
+                self.product.mark_notification_read(user_id, notification_id)
+                self.product.audit(user_id, "notification_viewed", {"notification_id": notification_id})
+                self.product.connection.commit()
+                return Response(204, {})
+            if method == "POST" and path == "/v1/notifications/read-all":
+                count = self.product.mark_all_notifications_read(user_id)
+                self.product.audit(user_id, "notifications_marked_read", {"count": count})
+                self.product.connection.commit()
+                return Response(200, {"count": count})
+            if method == "GET" and path.startswith("/v1/export/"):
+                export_type = path.rsplit("/", 1)[-1]
+                filename, content = self.product.export_csv(user_id, export_type)
+                self.product.audit(user_id, "data_export_completed", {"export_type": export_type, "row_count": max(0, content.count("\n") - 1)})
+                self.product.connection.commit()
+                return Response(200, {"filename": filename, "content_type": "text/csv; charset=utf-8", "content": content})
             if path == "/v1/admin/invites":
                 return self._invites(user_id, method, body)
+            if method == "GET" and path == "/v1/admin/overview":
+                user = self.product.get_user(user_id)
+                if not user or user["role"] != "admin":
+                    return self._error(403, "admin_required", "需要管理员权限")
+                return Response(200, self.product.admin_overview())
         except (ValueError, InvalidOperation) as error:
             return self._error(400, "invalid_request", str(error))
         except Exception as error:
