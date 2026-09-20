@@ -142,6 +142,25 @@ class ConsoleTests(unittest.TestCase):
         notifications = self.api.handle(Request("GET", "/v1/notifications", cookie=cookie))
         self.assertTrue(any(item["notification_type"] == "market_price_stale" for item in notifications.body["items"]))
 
+    def test_strategy_v2_configuration_versions_and_scoped_routes(self):
+        cookie = self.register()
+        created = self.api.handle(Request("POST", "/v1/strategies", cookie=cookie, csrf_token=self.csrf_token, body={"strategy_type": "moving_average", "config": {"short_window": 5, "long_window": 20, "budget_usdt": "25"}}))
+        self.assertEqual(created.status, 201)
+        strategy_id = created.body["strategy_id"]
+        self.assertEqual(created.body["current_version"], "v1")
+        listed = self.api.handle(Request("GET", "/v1/strategies", cookie=cookie))
+        self.assertEqual([item["strategy_id"] for item in listed.body["items"]], [strategy_id])
+        updated = self.api.handle(Request("PUT", f"/v1/strategies/{strategy_id}", cookie=cookie, csrf_token=self.csrf_token, body={"config": {"short_window": 8, "long_window": 30, "budget_usdt": "30"}}))
+        self.assertEqual(updated.body["current_version"], "v2")
+        started = self.api.handle(Request("POST", f"/v1/strategies/{strategy_id}/start", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(started.body["status"], "running")
+        blocked_update = self.api.handle(Request("PUT", f"/v1/strategies/{strategy_id}", cookie=cookie, csrf_token=self.csrf_token, body={"config": {"short_window": 5, "long_window": 20, "budget_usdt": "25"}}))
+        self.assertEqual(blocked_update.status, 400)
+        stopped = self.api.handle(Request("POST", f"/v1/strategies/{strategy_id}/stop", cookie=cookie, csrf_token=self.csrf_token))
+        self.assertEqual(stopped.body["status"], "stopped")
+        self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/{strategy_id}/signals", cookie=cookie)).body["items"], [])
+        self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/not-owned", cookie=cookie)).status, 404)
+
     def test_admin_overview_is_admin_only(self):
         user_cookie = self.register()
         self.assertEqual(self.api.handle(Request("GET", "/v1/admin/overview", cookie=user_cookie)).status, 403)

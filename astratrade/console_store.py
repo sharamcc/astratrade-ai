@@ -120,6 +120,53 @@ class ConsoleStore:
             );
             CREATE INDEX IF NOT EXISTS idx_console_notifications_user_created
                 ON console_notifications(user_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS strategy_instances (
+                strategy_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                current_version TEXT NOT NULL,
+                config TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'stopped',
+                next_run_at TEXT,
+                last_run_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_instances_user
+                ON strategy_instances(user_id, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS strategy_versions (
+                strategy_id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                config TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                PRIMARY KEY(strategy_id, version)
+            );
+            CREATE TABLE IF NOT EXISTS strategy_signals (
+                signal_id TEXT PRIMARY KEY,
+                strategy_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                strategy_version TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                action TEXT NOT NULL,
+                requested_notional TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                market_snapshot_id TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_signals_user_created
+                ON strategy_signals(user_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS strategy_runs (
+                execution_key TEXT PRIMARY KEY,
+                strategy_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                strategy_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                error TEXT
+            );
             """
         )
         self.connection.execute(
@@ -346,6 +393,69 @@ class ConsoleStore:
             {"template_id": "conservative", "name": "保守定投", "budget_usdt": "100", "frequency": "weekly", "description": "默认推荐，节奏稳定，资金占用较低。"},
             {"template_id": "frequent_small", "name": "高频小额", "budget_usdt": "100", "frequency": "daily", "description": "适合观察每日执行和手续费影响。"},
         ]
+
+    def strategies(self, user_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM strategy_instances WHERE user_id=? ORDER BY updated_at DESC", (user_id,)).fetchall()
+        return [self._strategy_payload(row) for row in rows]
+
+    def strategy(self, user_id: str, strategy_id: str) -> Optional[dict[str, Any]]:
+        row = self.connection.execute("SELECT * FROM strategy_instances WHERE user_id=? AND strategy_id=?", (user_id, strategy_id)).fetchone()
+        return self._strategy_payload(row) if row else None
+
+    @staticmethod
+    def _strategy_payload(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["config"] = json.loads(result["config"])
+        return result
+
+    def create_strategy(self, user_id: str, strategy_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        from .strategies import build_strategy
+
+        build_strategy(strategy_type, config)
+        strategy_id = "strategy_" + secrets.token_urlsafe(10)
+        created = iso(now())
+        version = "v1"
+        payload = json.dumps(config, ensure_ascii=False, sort_keys=True)
+        with self.connection:
+            self.connection.execute("INSERT INTO strategy_instances(strategy_id,user_id,strategy_type,current_version,config,status,next_run_at,last_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (strategy_id, user_id, strategy_type, version, payload, "stopped", None, None, created, created))
+            self.connection.execute("INSERT INTO strategy_versions(strategy_id,version,config,created_at,created_by) VALUES (?,?,?,?,?)", (strategy_id, version, payload, created, user_id))
+        return self.strategy(user_id, strategy_id)  # type: ignore[return-value]
+
+    def update_strategy(self, user_id: str, strategy_id: str, config: dict[str, Any]) -> dict[str, Any]:
+        from .strategies import build_strategy
+
+        row = self.connection.execute("SELECT * FROM strategy_instances WHERE user_id=? AND strategy_id=?", (user_id, strategy_id)).fetchone()
+        if not row:
+            raise ValueError("strategy not found")
+        if row["status"] == "running":
+            raise ValueError("stop strategy before changing its configuration")
+        build_strategy(row["strategy_type"], config)
+        current = int(str(row["current_version"]).lstrip("v"))
+        version = f"v{current + 1}"
+        updated = iso(now())
+        payload = json.dumps(config, ensure_ascii=False, sort_keys=True)
+        with self.connection:
+            self.connection.execute("UPDATE strategy_instances SET current_version=?, config=?, updated_at=? WHERE user_id=? AND strategy_id=?", (version, payload, updated, user_id, strategy_id))
+            self.connection.execute("INSERT INTO strategy_versions(strategy_id,version,config,created_at,created_by) VALUES (?,?,?,?,?)", (strategy_id, version, payload, updated, user_id))
+        return self.strategy(user_id, strategy_id)  # type: ignore[return-value]
+
+    def set_strategy_status(self, user_id: str, strategy_id: str, status: str) -> dict[str, Any]:
+        if status not in {"running", "stopped"}:
+            raise ValueError("invalid strategy status")
+        if not self.strategy(user_id, strategy_id):
+            raise ValueError("strategy not found")
+        updated = iso(now())
+        with self.connection:
+            self.connection.execute("UPDATE strategy_instances SET status=?, next_run_at=?, updated_at=? WHERE user_id=? AND strategy_id=?", (status, updated if status == "running" else None, updated, user_id, strategy_id))
+        return self.strategy(user_id, strategy_id)  # type: ignore[return-value]
+
+    def strategy_signals(self, user_id: str, strategy_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM strategy_signals WHERE user_id=? AND strategy_id=? ORDER BY created_at DESC LIMIT 100", (user_id, strategy_id)).fetchall()
+        return [dict(row) for row in rows]
+
+    def strategy_runs(self, user_id: str, strategy_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM strategy_runs WHERE user_id=? AND strategy_id=? ORDER BY started_at DESC LIMIT 100", (user_id, strategy_id)).fetchall()
+        return [dict(row) for row in rows]
 
     def analytics(self, user_id: str, price: Decimal) -> dict[str, Any]:
         account = self.connection.execute("SELECT * FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()

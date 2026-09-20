@@ -104,6 +104,48 @@ class ConsoleAPI:
                 self.product.notify(user_id, "agent_stopped", "Agent 已停止", "后续调度将暂停，现有模拟账户不会被修改。", "agent", user_id, f"agent_stopped:{result['updated_at']}")
                 self.product.connection.commit()
                 return Response(200, result)
+            if path == "/v1/strategies" and method == "GET":
+                return Response(200, {"items": self.product.strategies(user_id)})
+            if path == "/v1/strategies" and method == "POST":
+                strategy_type = str(body.get("strategy_type", ""))
+                config = body.get("config")
+                if not isinstance(config, dict):
+                    return self._error(400, "config_required", "策略配置不能为空")
+                result = self.product.create_strategy(user_id, strategy_type, config)
+                self.product.audit(user_id, "strategy_created", {"strategy_id": result["strategy_id"], "strategy_type": strategy_type, "strategy_version": result["current_version"]})
+                self.product.connection.commit()
+                return Response(201, result)
+            if path.startswith("/v1/strategies/"):
+                parts = path.strip("/").split("/")
+                strategy_id = parts[2] if len(parts) > 2 else ""
+                suffix = parts[3] if len(parts) > 3 else ""
+                if not strategy_id:
+                    return self._error(404, "strategy_not_found", "策略不存在")
+                if not suffix and method == "GET":
+                    result = self.product.strategy(user_id, strategy_id)
+                    return Response(200, result) if result else self._error(404, "strategy_not_found", "策略不存在或无权查看")
+                if not suffix and method == "PUT":
+                    config = body.get("config")
+                    if not isinstance(config, dict):
+                        return self._error(400, "config_required", "策略配置不能为空")
+                    result = self.product.update_strategy(user_id, strategy_id, config)
+                    self.product.audit(user_id, "strategy_config_saved", {"strategy_id": strategy_id, "strategy_version": result["current_version"]})
+                    self.product.connection.commit()
+                    return Response(200, result)
+                if suffix in {"start", "stop"} and method == "POST":
+                    result = self.product.set_strategy_status(user_id, strategy_id, "running" if suffix == "start" else "stopped")
+                    self.product.audit(user_id, "strategy_started" if suffix == "start" else "strategy_stopped", {"strategy_id": strategy_id, "strategy_version": result["current_version"]})
+                    self.product.connection.commit()
+                    return Response(200, result)
+                if suffix == "signals" and method == "GET":
+                    return Response(200, {"items": self.product.strategy_signals(user_id, strategy_id)})
+                if suffix == "runs" and method == "GET":
+                    return Response(200, {"items": self.product.strategy_runs(user_id, strategy_id)})
+                if suffix == "performance" and method == "GET":
+                    runs = self.product.strategy_runs(user_id, strategy_id)
+                    signals = self.product.strategy_signals(user_id, strategy_id)
+                    return Response(200, {"strategy_id": strategy_id, "run_count": len(runs), "signal_count": len(signals), "simulation": True})
+                return self._error(404, "route_not_found", "策略接口不存在")
             if method == "GET" and path.startswith("/v1/orders/"):
                 order_id = path.rsplit("/", 1)[-1]
                 detail = self.product.order_detail(user_id, order_id)
