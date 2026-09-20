@@ -24,6 +24,7 @@ class StrategyContext:
     prices: tuple[Decimal, ...] = ()
     previous_price: Decimal | None = None
     allocations: tuple[dict[str, Any], ...] = ()
+    cooldown_active: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,8 @@ class MovingAverageStrategy:
         return None
 
     def evaluate(self, context: StrategyContext) -> list[Signal]:
+        if context.cooldown_active:
+            return [_signal(context, context.market.instrument, "skip", Decimal("0"), "strategy_cooldown_active", "cooldown")]
         if len(context.prices) < self.long_window:
             return [_signal(context, context.market.instrument, "skip", Decimal("0"), "insufficient_price_history", "insufficient-history")]
         short = sum(context.prices[-self.short_window:], Decimal("0")) / self.short_window
@@ -178,16 +181,21 @@ class PortfolioDcaStrategy:
         if not isinstance(raw_allocations, list) or not raw_allocations:
             raise ValueError("allocations must be a non-empty list")
         self.allocations = tuple(self._allocation(item) for item in raw_allocations)
-        total = sum(item["weight"] for item in self.allocations)
-        if total != Decimal("1"):
+        modes = {item["mode"] for item in self.allocations}
+        if len(modes) != 1:
+            raise ValueError("allocations must use either weights or fixed amounts")
+        if modes == {"weight"} and sum(item["weight"] for item in self.allocations) != Decimal("1"):
             raise ValueError("allocation weights must total 1")
+        if modes == {"amount"} and sum(item["amount_usdt"] for item in self.allocations) > self.budget:
+            raise ValueError("allocation amounts must not exceed budget_usdt")
 
     @staticmethod
     def _allocation(item: Any) -> dict[str, Any]:
         if not isinstance(item, dict) or not item.get("instrument"):
             raise ValueError("each allocation needs an instrument")
-        weight = _decimal(item, "weight")
-        return {"instrument": str(item["instrument"]), "weight": weight}
+        if item.get("weight") is not None:
+            return {"instrument": str(item["instrument"]), "mode": "weight", "weight": _decimal(item, "weight")}
+        return {"instrument": str(item["instrument"]), "mode": "amount", "amount_usdt": _decimal(item, "amount_usdt")}
 
     def validate_config(self) -> None:
         return None
@@ -201,7 +209,7 @@ class PortfolioDcaStrategy:
             if instrument not in prices or prices[instrument] <= 0:
                 signals.append(_signal(context, instrument, "skip", Decimal("0"), "portfolio_market_unavailable", "market-unavailable"))
                 continue
-            notional = (self.budget * item["weight"]).quantize(Decimal("0.00000001"))
+            notional = (self.budget * item["weight"] if item["mode"] == "weight" else item["amount_usdt"]).quantize(Decimal("0.00000001"))
             signals.append(_signal(context, instrument, "buy", notional, "portfolio_rebalance_dca", "scheduled"))
         return signals
 

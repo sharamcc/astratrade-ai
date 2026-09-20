@@ -11,6 +11,7 @@ from astratrade.console_store import ConsoleStore
 from astratrade.domain import OAuthTokenSet, User
 from astratrade.oauth import OAuthService
 from astratrade.repository import Repository
+from astratrade.simulation import run_due
 
 
 class OAuthClient:
@@ -173,7 +174,9 @@ class ConsoleTests(unittest.TestCase):
             started = self.api.handle(Request("POST", f"/v1/strategies/{strategy_id}/start", cookie=cookie, csrf_token=self.csrf_token))
         self.assertEqual(started.body["run"]["status"], "filled")
         self.assertEqual(len(self.store.orders(user_id)), 1)
-        duplicate = self.store.run_strategy_once(user_id, strategy_id, Decimal("60000"), started.body["run"]["execution_key"].split(":", 2)[2])
+        self.assertEqual(self.store.connection.execute("SELECT COUNT(*) FROM market_snapshots WHERE user_id=?", (user_id,)).fetchone()[0], 1)
+        self.assertEqual(self.store.connection.execute("SELECT COUNT(*) FROM risk_decisions WHERE user_id=?", (user_id,)).fetchone()[0], 1)
+        duplicate = self.store.run_strategy_once(user_id, strategy_id, Decimal("60000"), started.body["run"]["execution_key"].split(":", 3)[3])
         self.assertEqual(duplicate["status"], "duplicate")
         self.assertEqual(len(self.store.orders(user_id)), 1)
 
@@ -192,6 +195,23 @@ class ConsoleTests(unittest.TestCase):
         self.assertTrue(any(event["event_type"] == "risk_blocked" for event in events))
         notices = self.store.notifications(user_id)
         self.assertTrue(any(item["notification_type"] == "risk_blocked" for item in notices))
+
+    def test_strategy_performance_export_and_worker_due_execution(self):
+        cookie = self.register()
+        user_id = self.api.handle(Request("GET", "/v1/auth/me", cookie=cookie)).body["user_id"]
+        created = self.api.handle(Request("POST", "/v1/strategies", cookie=cookie, csrf_token=self.csrf_token, body={"strategy_type": "dca", "config": {"budget_usdt": "25", "frequency": "daily"}}))
+        strategy_id = created.body["strategy_id"]
+        scheduled = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        self.store.connection.execute("UPDATE strategy_instances SET status='running', next_run_at=? WHERE strategy_id=?", (scheduled, strategy_id))
+        self.store.connection.commit()
+        self.assertEqual(run_due(self.store, Decimal("60000")), 1)
+        performance = self.api.handle(Request("GET", f"/v1/strategies/{strategy_id}/performance", cookie=cookie))
+        self.assertEqual(performance.body["filled_run_count"], 1)
+        export = self.api.handle(Request("GET", "/v1/export/strategies", cookie=cookie))
+        self.assertEqual(export.status, 200)
+        self.assertIn("signal_id", export.body["content"])
+        self.assertIn(strategy_id, export.body["content"])
+        self.assertEqual(self.api.handle(Request("GET", f"/v1/strategies/{strategy_id}/signals", cookie=cookie)).body["items"][0]["risk_allowed"], 1)
 
     def test_admin_overview_is_admin_only(self):
         user_cookie = self.register()

@@ -148,9 +148,9 @@ class ConsoleAPI:
                 if suffix == "runs" and method == "GET":
                     return Response(200, {"items": self.product.strategy_runs(user_id, strategy_id)})
                 if suffix == "performance" and method == "GET":
-                    runs = self.product.strategy_runs(user_id, strategy_id)
-                    signals = self.product.strategy_signals(user_id, strategy_id)
-                    return Response(200, {"strategy_id": strategy_id, "run_count": len(runs), "signal_count": len(signals), "simulation": True})
+                    if not self.product.strategy(user_id, strategy_id):
+                        return self._error(404, "strategy_not_found", "策略不存在或无权查看")
+                    return Response(200, self.product.strategy_performance(user_id, strategy_id))
                 return self._error(404, "route_not_found", "策略接口不存在")
             if method == "GET" and path.startswith("/v1/orders/"):
                 order_id = path.rsplit("/", 1)[-1]
@@ -182,6 +182,11 @@ class ConsoleAPI:
                 return Response(200, {"count": count})
             if method == "GET" and path.startswith("/v1/export/"):
                 export_type = path.rsplit("/", 1)[-1]
+                if export_type == "strategies":
+                    filename, content = self.product.export_strategy_csv(user_id)
+                    self.product.audit(user_id, "data_export_completed", {"export_type": export_type, "row_count": max(0, content.count("\n") - 1)})
+                    self.product.connection.commit()
+                    return Response(200, {"filename": filename, "content_type": "text/csv; charset=utf-8", "content": content})
                 if export_type == "agent":
                     content = self.product.export_agent_config(user_id)
                     self.product.audit(user_id, "data_export_completed", {"export_type": export_type, "row_count": 1})
