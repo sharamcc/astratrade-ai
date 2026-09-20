@@ -1,0 +1,160 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-09-15T12:01:31.686Z",
+  "timezone": "Asia/Shanghai",
+  "source": {
+    "provider": "OKX MCP",
+    "instrument": "ETH-USDT-SWAP",
+    "market": "live",
+    "simulated_trading": false
+  },
+  "market_snapshot": {
+    "last_price": 2475.03,
+    "mark_price": 2475.02,
+    "bid_price": 2475.02,
+    "ask_price": 2475.03,
+    "funding_rate": 0.0000052015801849,
+    "funding_rate_percent": 0.000520158,
+    "open_interest_usd": 1584075534.5558,
+    "data_timestamp_ms": 1789473731846
+  },
+  "account_snapshot": {
+    "total_equity_usdt": 815.0594496175,
+    "adjusted_equity_usdt": 814.976218884,
+    "available_equity_usdt": 660.5045456439,
+    "order_frozen_usdt": 64.381076555,
+    "existing_option_notional_usd": 8457.834,
+    "eth_swap_position": false,
+    "eth_swap_open_orders": false
+  },
+  "multi_timeframe_analysis": {
+    "30m": {
+      "current_candle_confirmed": false,
+      "last_closed_close": 2475.32,
+      "ema20": 2487.111138,
+      "ema50": 2500.52964,
+      "ema200": 2501.603972,
+      "rsi14": 37.500474,
+      "atr14": 10.19,
+      "volume_ratio": 0.831966,
+      "bias": "bearish_pullback_with_rebound",
+      "summary": "30m 仍低于 EMA20/50/200，短线结构偏弱；价格从 2463 附近反弹，但尚未重新站上 2491.20，暂不追多。",
+      "support": [2470.48, 2465.94, 2465.41, 2463.12],
+      "resistance": [2482.67, 2491.2, 2494.8, 2500.44]
+    },
+    "4H": {
+      "current_candle_confirmed": false,
+      "last_closed_close": 2475.32,
+      "ema20": 2500.893118,
+      "ema50": 2492.899929,
+      "ema200": 2324.915367,
+      "rsi14": 44.341952,
+      "atr14": 39.145714,
+      "volume_ratio": 0.928625,
+      "bias": "bearish_pullback_above_long_term_trend",
+      "summary": "4H 仍低于 EMA20 和 EMA50，但高于 EMA200；短线反弹尚未改变回撤结构。",
+      "support": [2463.56, 2462.42, 2460.01, 2457.38],
+      "resistance": [2483.67, 2489.76, 2507.43, 2507.57]
+    },
+    "1D": {
+      "current_candle_confirmed": false,
+      "last_closed_close": 2507.18,
+      "ema20": 2440.943981,
+      "ema50": 2262.87756,
+      "ema200": 2201.774371,
+      "rsi14": 60.709801,
+      "atr14": 90.656429,
+      "volume_ratio": 0.976211,
+      "bias": "bullish_structure_under_pullback",
+      "summary": "日线仍在 EMA20/50/200 上方，较高周期结构尚未破坏；当前 4H 回撤尚未完成。",
+      "support": [2413.56, 2404.03, 2355.56],
+      "resistance": [2534.48, 2536.88, 2548.37, 2549.34]
+    },
+    "1W": {
+      "current_candle_confirmed": false,
+      "last_closed_close": 2489.67,
+      "ema20": 2150.370948,
+      "ema50": 2379.639058,
+      "ema200": 2545.669065,
+      "rsi14": 59.942945,
+      "atr14": 210.15,
+      "volume_ratio": 0.777307,
+      "bias": "recovery_below_long_term_resistance",
+      "summary": "周线处于修复性反弹，价格高于 EMA20/50 但低于 EMA200；2545.67 仍是长期压力。",
+      "support": [2356.44, 2149.34, 2108.47, 2086.11],
+      "resistance": [2728.99, 2858.82, 2878.59]
+    }
+  },
+  "trading_plan": {
+    "status": "WAIT_FOR_CONFIRMATION",
+    "overall_bias": "intraday_bearish_higher_timeframes_still_bullish",
+    "material_change_since_previous": false,
+    "change_summary": "价格自 2467.74 反弹至 2475.03，但仍处于短线支撑与 2491.20 反弹确认位之间，未触发交易条件。",
+    "current_action": "继续等待：30m 收盘跌破 2470.48 后反抽失败才考虑空；若重新站上 2491.20，则取消空头并等待回踩做多。",
+    "no_trade_zone": {
+      "low": 2470.48,
+      "high": 2491.2,
+      "reason": "当前价格仍在支撑和短线反弹确认位之间，追单的盈亏比不足。"
+    },
+    "setups": [
+      {
+        "id": "short_breakdown",
+        "priority": 1,
+        "side": "short",
+        "trigger": "30m 收盘跌破 2470.48，反抽 2470–2475 失败后再次转弱。",
+        "entry_range": [2470.0, 2475.0],
+        "stop_loss": 2484.0,
+        "take_profit": [
+          {"price": 2463.0, "reduce_percent": 30},
+          {"price": 2413.0, "reduce_percent": 45},
+          {"price": 2404.0, "reduce_percent": 25}
+        ],
+        "invalidation": "30m 收盘重新站上 2484.00，或破位后无法维持 2470.48 下方。",
+        "risk_percent": 0.25,
+        "note": "日线和周线仍偏多，空单只做确认后的短线，仓位不放大。",
+        "example_sizing": {
+          "entry": 2473.0,
+          "risk_usdt": 2.03765,
+          "contract_value_eth": 0.1,
+          "contracts": 1.86,
+          "eth_quantity": 0.186,
+          "approx_notional_usdt": 460.578
+        }
+      },
+      {
+        "id": "long_reclaim",
+        "priority": 2,
+        "side": "long",
+        "trigger": "30m 收盘重新站上 2491.20，回踩 2484–2491 后守住 2484。",
+        "entry_range": [2485.0, 2492.0],
+        "stop_loss": 2463.0,
+        "take_profit": [
+          {"price": 2500.0, "reduce_percent": 30},
+          {"price": 2507.0, "reduce_percent": 40},
+          {"price": 2534.0, "reduce_percent": 30}
+        ],
+        "invalidation": "30m 收盘重新跌破 2470.48，或回踩后失守 2484.00。",
+        "risk_percent": 0.25,
+        "example_sizing": {
+          "entry": 2488.0,
+          "risk_usdt": 2.03765,
+          "contract_value_eth": 0.1,
+          "contracts": 0.92,
+          "eth_quantity": 0.092,
+          "approx_notional_usdt": 228.896
+        }
+      }
+    ],
+    "risk_rules": {
+      "max_risk_percent_of_total_equity": 0.25,
+      "max_risk_usdt": 2.03765,
+      "position_mode": "isolated_preferred",
+      "suggested_max_leverage": 3,
+      "sizing_formula": "contracts = floor((risk_usdt / abs(entry - stop_loss) / 0.1) / 0.01) * 0.01",
+      "do_not_add_to_losing_position": true,
+      "do_not_use_maximum_exchange_leverage": true
+    },
+    "order_submitted": false,
+    "disclaimer": "这是基于 OKX MCP 实时数据的条件化交易计划，不构成收益保证；执行前应重新确认未收盘 K 线、盘口和账户风险。"
+  }
+}
