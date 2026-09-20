@@ -687,20 +687,27 @@ class ConsoleStore:
             final_status = "filled" if any(item["status"] == "filled" for item in results) else ("risk_blocked" if any(item["status"] == "risk_blocked" for item in results) else "skipped")
             finished = iso(now())
             self.connection.execute("UPDATE execution_runs SET status=?, finished_at=? WHERE execution_key=?", (final_status, finished, execution_key))
-            self._record_strategy_performance_snapshot(user_id, strategy_id, price, execution_key, finished)
+            self._record_strategy_performance_snapshot(user_id, strategy_id, price, execution_key, finished, instrument_prices)
             self.connection.execute("UPDATE strategy_instances SET last_run_at=?, next_run_at=?, updated_at=? WHERE user_id=? AND strategy_id=?", (finished, iso(now() + interval), finished, user_id, strategy_id))
         return {"status": final_status, "execution_key": execution_key, "signals": results}
 
     def _record_risk_decision(self, user_id: str, signal_id: str, allowed: bool, reason: str, threshold: Any, actual: Any) -> None:
         self.connection.execute("INSERT INTO risk_decisions(decision_id,signal_id,user_id,allowed,rule,threshold,actual,reason,created_at) VALUES (?,?,?,?,?,?,?,?,?)", ("risk_" + secrets.token_urlsafe(10), signal_id, user_id, 1 if allowed else 0, "strategy_simulation_guard", str(threshold) if threshold is not None else None, str(actual) if actual is not None else None, reason, iso(now())))
 
-    def _record_strategy_performance_snapshot(self, user_id: str, strategy_id: str, price: Decimal, execution_key: str, created_at: str) -> None:
+    def _record_strategy_performance_snapshot(self, user_id: str, strategy_id: str, price: Decimal, execution_key: str, created_at: str, market_prices: Optional[dict[str, Decimal]] = None) -> None:
         account = self.connection.execute("SELECT cash_usdt, btc, initial_cash_usdt FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()
         if not account:
             return
-        equity = Decimal(account["cash_usdt"]) + Decimal(account["btc"]) * price
+        prices = market_prices or {"BTC-USDT": price}
+        positions = self.connection.execute("SELECT instrument, quantity FROM sim_positions WHERE user_id=?", (user_id,)).fetchall()
+        equity = Decimal(account["cash_usdt"])
+        for position in positions:
+            instrument_price = prices.get(str(position["instrument"]))
+            if instrument_price is not None:
+                equity += Decimal(position["quantity"]) * instrument_price
         pnl = equity - Decimal(account["initial_cash_usdt"])
-        self.connection.execute("INSERT OR IGNORE INTO strategy_performance_snapshots(snapshot_id,strategy_id,user_id,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (f"strategy-performance:{execution_key}", strategy_id, user_id, str(price), str(equity), str(pnl), created_at))
+        benchmark_price = prices.get("BTC-USDT", price)
+        self.connection.execute("INSERT OR IGNORE INTO strategy_performance_snapshots(snapshot_id,strategy_id,user_id,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (f"strategy-performance:{execution_key}", strategy_id, user_id, str(benchmark_price), str(equity), str(pnl), created_at))
 
     def _fill_strategy_signal(self, user_id: str, signal: Any, price: Decimal, execution_key: str) -> dict[str, Any]:
         if price <= 0:
@@ -722,20 +729,21 @@ class ConsoleStore:
             self.notify(user_id, "risk_blocked", "策略执行被拦截", "可用模拟余额不足，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
             return {"signal_id": signal.signal_id, "action": signal.action, "reason": "insufficient_cash_or_invalid_price", "status": "risk_blocked"}
         if signal.action == "sell" and holdings < quantity:
-            self.audit(user_id, "risk_blocked", {"reason": "insufficient_btc", "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
-            self.notify(user_id, "risk_blocked", "策略执行被拦截", "模拟 BTC 持仓不足，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
-            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "insufficient_btc", "status": "risk_blocked"}
+            self.audit(user_id, "risk_blocked", {"reason": "insufficient_position", "instrument": signal.instrument, "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
+            self.notify(user_id, "risk_blocked", "策略执行被拦截", f"模拟 {signal.instrument} 持仓不足，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
+            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "insufficient_position", "status": "risk_blocked"}
 
         order_id = "sim_" + secrets.token_urlsafe(10)
         created = iso(now())
         next_cash = cash - notional - fee if signal.action == "buy" else cash + notional - fee
         next_holdings = holdings + quantity if signal.action == "buy" else holdings - quantity
         next_btc = next_holdings if signal.instrument == "BTC-USDT" else Decimal(account["btc"])
-        equity = next_cash + next_btc * price
         self.connection.execute("UPDATE sim_accounts SET cash_usdt=?, btc=?, updated_at=? WHERE user_id=?", (str(next_cash), str(next_btc), created, user_id))
         self.connection.execute("INSERT INTO sim_positions(user_id,instrument,quantity,updated_at) VALUES (?,?,?,?) ON CONFLICT(user_id,instrument) DO UPDATE SET quantity=excluded.quantity, updated_at=excluded.updated_at", (user_id, signal.instrument, str(next_holdings), created))
         self.connection.execute("INSERT INTO sim_orders VALUES (?,?,?,?,?,?,?,?,?,?,?)", (order_id, f"{execution_key}:{signal.signal_id}", user_id, signal.instrument, signal.action, str(quantity), str(price), str(notional), str(fee), "filled", created))
-        self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, str(next_cash), str(next_btc), str(price), str(equity), str(equity - Decimal(account["initial_cash_usdt"])), created))
+        if signal.instrument == "BTC-USDT":
+            equity = next_cash + next_btc * price
+            self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, str(next_cash), str(next_btc), str(price), str(equity), str(equity - Decimal(account["initial_cash_usdt"])), created))
         self.audit(user_id, "strategy_order_filled", {"order_id": order_id, "strategy_id": signal.strategy_id, "strategy_version": signal.strategy_version, "signal_id": signal.signal_id, "reason": signal.reason, "fee": str(fee)})
         self.notify(user_id, "order_filled", "策略模拟订单已成交", f"{signal.instrument} {signal.action} {quantity}，手续费 {fee} USDT。", "order", order_id, f"strategy-order:{order_id}")
         return {"signal_id": signal.signal_id, "order_id": order_id, "action": signal.action, "reason": signal.reason, "status": "filled", "fee_usdt": str(fee)}
