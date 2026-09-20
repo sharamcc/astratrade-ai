@@ -9,6 +9,7 @@ monitor.out
 
 web/node_modules/
 web/dist/
+web/tsconfig.tsbuildinfo
 __pycache__/
 *.pyc
 .pytest_cache/
