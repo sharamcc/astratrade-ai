@@ -1,5 +1,9 @@
 # AstraTrade AI — OKX 策略监控与执行原型
 
+<p align="center">
+  <img src="assets/astratrade-ai-logo.png" width="220" alt="AstraTrade AI logo">
+</p>
+
 一个自包含的 Python 交易 Agent 原型：读取 `trading_plan.json`，每 5 分钟扫描 OKX 公共行情，
 按交易计划中的触发条件（基于 30m 收线确认）评估并执行。默认以只读/确认模式运行，供策略验证和小额测试使用；不构成投资建议或收益承诺。
 
