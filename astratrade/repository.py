@@ -135,6 +135,13 @@ class Repository:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sessions (
+                token_hash TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(user_id),
+                expires_at TEXT NOT NULL,
+                revoked INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
             """
         )
         self.connection.commit()
@@ -448,3 +455,39 @@ class Repository:
             self.set_connection_status(user_id, ConnectionStatus.EXPIRED)
             return None
         return connection
+
+    def create_session(self, token_hash: str, user_id: str, expires_at: datetime) -> None:
+        if self.get_user(user_id) is None:
+            raise ValueError("unknown user")
+        self.connection.execute(
+            """
+            INSERT INTO sessions(token_hash, user_id, expires_at, revoked, created_at)
+            VALUES (?, ?, ?, 0, ?)
+            """,
+            (token_hash, user_id, expires_at.isoformat(), _now()),
+        )
+        self.connection.commit()
+
+    def get_active_session_user(
+        self, token_hash: str, now: Optional[datetime] = None
+    ) -> Optional[str]:
+        row = self.connection.execute(
+            """
+            SELECT sessions.user_id, sessions.expires_at, users.status
+            FROM sessions JOIN users ON users.user_id = sessions.user_id
+            WHERE sessions.token_hash = ? AND sessions.revoked = 0
+            """,
+            (token_hash,),
+        ).fetchone()
+        if row is None or row["status"] != "active":
+            return None
+        current = now or datetime.now(timezone.utc)
+        if current >= _dt(row["expires_at"]):
+            return None
+        return row["user_id"]
+
+    def revoke_session(self, token_hash: str) -> None:
+        self.connection.execute(
+            "UPDATE sessions SET revoked = 1 WHERE token_hash = ?", (token_hash,)
+        )
+        self.connection.commit()

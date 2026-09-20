@@ -21,6 +21,7 @@ from .api import ApplicationAPI, Request, Response
 from .http_server import create_server
 from .okx_oauth import OKXOAuthClient, OKXOAuthConfig
 from .token_protector import FernetTokenProtector
+from .auth import SessionAuth
 
 __all__ = [
     "AccountSnapshot",
@@ -46,4 +47,5 @@ __all__ = [
     "OKXOAuthClient",
     "OKXOAuthConfig",
     "FernetTokenProtector",
+    "SessionAuth",
 ]
