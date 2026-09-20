@@ -66,6 +66,13 @@ class ConsoleStore:
                 initial_cash_usdt TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS sim_positions (
+                user_id TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                quantity TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, instrument)
+            );
             CREATE TABLE IF NOT EXISTS agent_configs (
                 user_id TEXT PRIMARY KEY,
                 budget_usdt TEXT NOT NULL,
@@ -120,6 +127,118 @@ class ConsoleStore:
             );
             CREATE INDEX IF NOT EXISTS idx_console_notifications_user_created
                 ON console_notifications(user_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS strategy_instances (
+                strategy_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                strategy_type TEXT NOT NULL,
+                current_version TEXT NOT NULL,
+                config TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'stopped',
+                next_run_at TEXT,
+                last_run_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_instances_user
+                ON strategy_instances(user_id, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS strategy_versions (
+                strategy_id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                config TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                PRIMARY KEY(strategy_id, version)
+            );
+            CREATE TABLE IF NOT EXISTS strategy_signals (
+                signal_id TEXT PRIMARY KEY,
+                strategy_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                strategy_version TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                action TEXT NOT NULL,
+                requested_notional TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                market_snapshot_id TEXT,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_signals_user_created
+                ON strategy_signals(user_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                price TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                source TEXT NOT NULL,
+                expires_at TEXT,
+                valid INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_snapshots_user_instrument
+                ON market_snapshots(user_id, instrument, observed_at DESC);
+            CREATE TABLE IF NOT EXISTS risk_decisions (
+                decision_id TEXT PRIMARY KEY,
+                signal_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                allowed INTEGER NOT NULL,
+                rule TEXT NOT NULL,
+                threshold TEXT,
+                actual TEXT,
+                reason TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_risk_decisions_user_created
+                ON risk_decisions(user_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS portfolio_allocations (
+                strategy_id TEXT NOT NULL,
+                strategy_version TEXT NOT NULL,
+                instrument TEXT NOT NULL,
+                weight TEXT,
+                amount_usdt TEXT,
+                sort_order INTEGER NOT NULL,
+                PRIMARY KEY(strategy_id, strategy_version, instrument)
+            );
+            CREATE TABLE IF NOT EXISTS strategy_runs (
+                execution_key TEXT PRIMARY KEY,
+                strategy_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                strategy_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS execution_runs (
+                execution_key TEXT PRIMARY KEY,
+                strategy_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                strategy_version TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_runs_user_started
+                ON execution_runs(user_id, started_at DESC);
+            CREATE TABLE IF NOT EXISTS strategy_performance_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                strategy_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                price TEXT NOT NULL,
+                equity_usdt TEXT NOT NULL,
+                pnl_usdt TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_strategy_performance_user_created
+                ON strategy_performance_snapshots(user_id, strategy_id, created_at DESC);
+            """
+        )
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO execution_runs(execution_key, strategy_id, user_id, strategy_version, status, started_at, finished_at, error)
+            SELECT execution_key, strategy_id, user_id, strategy_version, status, started_at, finished_at, error
+            FROM strategy_runs
             """
         )
         self.connection.execute(
@@ -132,7 +251,22 @@ class ConsoleStore:
             )
             """
         )
+        self.connection.execute(
+            "INSERT OR IGNORE INTO sim_positions(user_id,instrument,quantity,updated_at) SELECT user_id,'BTC-USDT',btc,updated_at FROM sim_accounts"
+        )
+        self._migrate_legacy_agents()
         self.connection.commit()
+
+    def _migrate_legacy_agents(self) -> None:
+        rows = self.connection.execute("SELECT user_id, budget_usdt, frequency FROM agent_configs").fetchall()
+        for row in rows:
+            self._ensure_legacy_strategy(row["user_id"], str(row["budget_usdt"]), str(row["frequency"]), iso(now()))
+
+    def _ensure_legacy_strategy(self, user_id: str, budget: str, frequency: str, created: str) -> None:
+        strategy_id = f"legacy_dca_{user_id}"
+        config = json.dumps({"budget_usdt": budget, "frequency": frequency}, ensure_ascii=False, sort_keys=True)
+        self.connection.execute("INSERT OR IGNORE INTO strategy_instances(strategy_id,user_id,strategy_type,current_version,config,status,next_run_at,last_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (strategy_id, user_id, "dca", "v1", config, "stopped", None, None, created, created))
+        self.connection.execute("INSERT OR IGNORE INTO strategy_versions(strategy_id,version,config,created_at,created_by) VALUES (?,?,?,?,?)", (strategy_id, "v1", config, created, user_id))
 
     def create_user(self, email: str, password: str, invite_code: str) -> dict[str, Any]:
         email = email.strip().lower()
@@ -165,10 +299,12 @@ class ConsoleStore:
                 "INSERT INTO sim_accounts VALUES (?,?,?,?,?)",
                 (user_id, "10000.00", "0", "10000.00", created),
             )
+            self.connection.execute("INSERT INTO sim_positions VALUES (?,?,?,?)", (user_id, "BTC-USDT", "0", created))
             self.connection.execute(
                 "INSERT INTO agent_configs VALUES (?,?,?,?,?,?,?)",
                 (user_id, "100.00", "daily", "stopped", None, None, created),
             )
+            self._ensure_legacy_strategy(user_id, "100.00", "daily", created)
             self.connection.execute(
                 "INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)",
                 (user_id, "10000.00", "0", "0", "10000.00", "0", created),
@@ -196,7 +332,9 @@ class ConsoleStore:
         with self.connection:
             self.connection.execute("INSERT INTO console_users VALUES (?,?,?,?,?)", (user_id, email, hash_password(password), "admin", created))
             self.connection.execute("INSERT INTO sim_accounts VALUES (?,?,?,?,?)", (user_id, "10000.00", "0", "10000.00", created))
+            self.connection.execute("INSERT INTO sim_positions VALUES (?,?,?,?)", (user_id, "BTC-USDT", "0", created))
             self.connection.execute("INSERT INTO agent_configs VALUES (?,?,?,?,?,?,?)", (user_id, "100.00", "daily", "stopped", None, None, created))
+            self._ensure_legacy_strategy(user_id, "100.00", "daily", created)
             self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, "10000.00", "0", "0", "10000.00", "0", created))
             self.audit(user_id, "admin_created", {})
         return self.get_user(user_id)  # type: ignore[return-value]
@@ -347,6 +485,280 @@ class ConsoleStore:
             {"template_id": "frequent_small", "name": "高频小额", "budget_usdt": "100", "frequency": "daily", "description": "适合观察每日执行和手续费影响。"},
         ]
 
+    def strategies(self, user_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM strategy_instances WHERE user_id=? ORDER BY updated_at DESC", (user_id,)).fetchall()
+        return [self._strategy_payload(row) for row in rows]
+
+    def strategy(self, user_id: str, strategy_id: str) -> Optional[dict[str, Any]]:
+        row = self.connection.execute("SELECT * FROM strategy_instances WHERE user_id=? AND strategy_id=?", (user_id, strategy_id)).fetchone()
+        return self._strategy_payload(row) if row else None
+
+    @staticmethod
+    def _strategy_payload(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["config"] = json.loads(result["config"])
+        return result
+
+    @staticmethod
+    def _validate_strategy_budget(config: dict[str, Any]) -> None:
+        try:
+            budget = Decimal(str(config["budget_usdt"]))
+        except (KeyError, InvalidOperation, ValueError) as error:
+            raise ValueError("budget_usdt must be a valid number") from error
+        if not budget.is_finite() or budget <= 0 or budget > Decimal("500"):
+            raise ValueError("budget_usdt must be between 0 and 500 USDT")
+
+    @classmethod
+    def _validate_strategy_limits(cls, strategy_type: str, config: dict[str, Any]) -> None:
+        cls._validate_strategy_budget(config)
+        if config.get("frequency", "daily") not in {"daily", "weekly"}:
+            raise ValueError("frequency must be daily or weekly")
+        if strategy_type == "moving_average":
+            try:
+                cooldown = Decimal(str(config.get("cooldown_hours", 0) or 0))
+            except (InvalidOperation, ValueError) as error:
+                raise ValueError("cooldown_hours must be a valid number") from error
+            if not cooldown.is_finite() or cooldown < 0 or cooldown > Decimal("720"):
+                raise ValueError("cooldown_hours must be between 0 and 720")
+        if strategy_type == "grid" and config.get("out_of_range_policy", "pause") not in {"pause"}:
+            raise ValueError("out_of_range_policy must be pause")
+
+    def _save_portfolio_allocations(self, strategy_id: str, version: str, config: dict[str, Any]) -> None:
+        allocations = config.get("allocations", [])
+        if not isinstance(allocations, list):
+            return
+        for index, item in enumerate(allocations):
+            if not isinstance(item, dict):
+                continue
+            self.connection.execute(
+                "INSERT INTO portfolio_allocations(strategy_id,strategy_version,instrument,weight,amount_usdt,sort_order) VALUES (?,?,?,?,?,?)",
+                (strategy_id, version, str(item.get("instrument", "")), str(item.get("weight")) if item.get("weight") is not None else None, str(item.get("amount_usdt")) if item.get("amount_usdt") is not None else None, index),
+            )
+
+    def create_strategy(self, user_id: str, strategy_type: str, config: dict[str, Any]) -> dict[str, Any]:
+        from .strategies import build_strategy
+
+        self._validate_strategy_limits(strategy_type, config)
+        build_strategy(strategy_type, config)
+        strategy_id = "strategy_" + secrets.token_urlsafe(10)
+        created = iso(now())
+        version = "v1"
+        payload = json.dumps(config, ensure_ascii=False, sort_keys=True)
+        with self.connection:
+            self.connection.execute("INSERT INTO strategy_instances(strategy_id,user_id,strategy_type,current_version,config,status,next_run_at,last_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (strategy_id, user_id, strategy_type, version, payload, "stopped", None, None, created, created))
+            self.connection.execute("INSERT INTO strategy_versions(strategy_id,version,config,created_at,created_by) VALUES (?,?,?,?,?)", (strategy_id, version, payload, created, user_id))
+            self._save_portfolio_allocations(strategy_id, version, config)
+        return self.strategy(user_id, strategy_id)  # type: ignore[return-value]
+
+    def update_strategy(self, user_id: str, strategy_id: str, config: dict[str, Any]) -> dict[str, Any]:
+        from .strategies import build_strategy
+
+        row = self.connection.execute("SELECT * FROM strategy_instances WHERE user_id=? AND strategy_id=?", (user_id, strategy_id)).fetchone()
+        if not row:
+            raise ValueError("strategy not found")
+        if row["status"] == "running":
+            raise ValueError("stop strategy before changing its configuration")
+        self._validate_strategy_limits(row["strategy_type"], config)
+        build_strategy(row["strategy_type"], config)
+        current = int(str(row["current_version"]).lstrip("v"))
+        version = f"v{current + 1}"
+        updated = iso(now())
+        payload = json.dumps(config, ensure_ascii=False, sort_keys=True)
+        with self.connection:
+            self.connection.execute("UPDATE strategy_instances SET current_version=?, config=?, updated_at=? WHERE user_id=? AND strategy_id=?", (version, payload, updated, user_id, strategy_id))
+            self.connection.execute("INSERT INTO strategy_versions(strategy_id,version,config,created_at,created_by) VALUES (?,?,?,?,?)", (strategy_id, version, payload, updated, user_id))
+            self._save_portfolio_allocations(strategy_id, version, config)
+        return self.strategy(user_id, strategy_id)  # type: ignore[return-value]
+
+    def set_strategy_status(self, user_id: str, strategy_id: str, status: str) -> dict[str, Any]:
+        if status not in {"running", "stopped"}:
+            raise ValueError("invalid strategy status")
+        current = self.strategy(user_id, strategy_id)
+        if not current:
+            raise ValueError("strategy not found")
+        if current["status"] == "inactive":
+            raise ValueError("inactive strategy must be copied before restarting")
+        updated = iso(now())
+        with self.connection:
+            self.connection.execute("UPDATE strategy_instances SET status=?, next_run_at=?, updated_at=? WHERE user_id=? AND strategy_id=?", (status, updated if status == "running" else None, updated, user_id, strategy_id))
+        return self.strategy(user_id, strategy_id)  # type: ignore[return-value]
+
+    def deactivate_strategy(self, user_id: str, strategy_id: str) -> dict[str, Any]:
+        strategy = self.strategy(user_id, strategy_id)
+        if not strategy:
+            raise ValueError("strategy not found")
+        if strategy["status"] == "running":
+            raise ValueError("stop strategy before deactivating it")
+        updated = iso(now())
+        with self.connection:
+            self.connection.execute("UPDATE strategy_instances SET status='inactive', next_run_at=NULL, updated_at=? WHERE user_id=? AND strategy_id=?", (updated, user_id, strategy_id))
+        return self.strategy(user_id, strategy_id)  # type: ignore[return-value]
+
+    def copy_strategy(self, user_id: str, strategy_id: str) -> dict[str, Any]:
+        source = self.strategy(user_id, strategy_id)
+        if not source:
+            raise ValueError("strategy not found")
+        return self.create_strategy(user_id, source["strategy_type"], dict(source["config"]))
+
+    def strategy_signals(self, user_id: str, strategy_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT s.*, r.allowed AS risk_allowed, r.rule AS risk_rule, r.threshold AS risk_threshold, r.actual AS risk_actual FROM strategy_signals AS s LEFT JOIN risk_decisions AS r ON r.signal_id=s.signal_id WHERE s.user_id=? AND s.strategy_id=? ORDER BY s.created_at DESC LIMIT 100", (user_id, strategy_id)).fetchall()
+        return [dict(row) for row in rows]
+
+    def strategy_runs(self, user_id: str, strategy_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM execution_runs WHERE user_id=? AND strategy_id=? ORDER BY started_at DESC LIMIT 100", (user_id, strategy_id)).fetchall()
+        return [dict(row) for row in rows]
+
+    def strategy_performance(self, user_id: str, strategy_id: str) -> dict[str, Any]:
+        runs = self.connection.execute("SELECT COUNT(*) AS total, SUM(status='filled') AS filled, SUM(status='risk_blocked') AS blocked FROM execution_runs WHERE user_id=? AND strategy_id=?", (user_id, strategy_id)).fetchone()
+        signals = self.connection.execute("SELECT COUNT(*) AS total, SUM(status='filled') AS filled, SUM(status='risk_blocked') AS blocked FROM strategy_signals WHERE user_id=? AND strategy_id=?", (user_id, strategy_id)).fetchone()
+        fees = self.connection.execute("SELECT COALESCE(SUM(CAST(json_extract(payload, '$.fee') AS REAL)), 0) AS total FROM console_audit WHERE user_id=? AND event_type='strategy_order_filled' AND json_extract(payload, '$.strategy_id')=?", (user_id, strategy_id)).fetchone()["total"]
+        snapshots = [Decimal(row["equity_usdt"]) for row in self.connection.execute("SELECT equity_usdt FROM strategy_performance_snapshots WHERE user_id=? AND strategy_id=? ORDER BY created_at", (user_id, strategy_id)).fetchall()]
+        peak = snapshots[0] if snapshots else Decimal("0")
+        max_drawdown = Decimal("0")
+        for equity in snapshots:
+            peak = max(peak, equity)
+            max_drawdown = max(max_drawdown, peak - equity)
+        return {"strategy_id": strategy_id, "run_count": runs["total"], "filled_run_count": runs["filled"] or 0, "risk_blocked_run_count": runs["blocked"] or 0, "signal_count": signals["total"], "filled_signal_count": signals["filled"] or 0, "risk_blocked_signal_count": signals["blocked"] or 0, "fees_usdt": f"{Decimal(str(fees)):.8f}", "equity_start_usdt": str(snapshots[0]) if snapshots else None, "equity_current_usdt": str(snapshots[-1]) if snapshots else None, "pnl_usdt": str(snapshots[-1] - snapshots[0]) if len(snapshots) > 1 else "0", "max_drawdown_usdt": str(max_drawdown), "simulation": True}
+
+    def export_strategy_csv(self, user_id: str, strategy_id: Optional[str] = None) -> tuple[str, str]:
+        where = "WHERE user_id=?" if not strategy_id else "WHERE user_id=? AND strategy_id=?"
+        args: tuple[Any, ...] = (user_id,) if not strategy_id else (user_id, strategy_id)
+        rows = self.connection.execute(f"SELECT signal_id, strategy_id, strategy_version, instrument, action, requested_notional, reason, status, created_at FROM strategy_signals {where} ORDER BY created_at", args).fetchall()
+        output = io.StringIO()
+        headers = ["signal_id", "strategy_id", "strategy_version", "instrument", "action", "requested_notional", "reason", "status", "created_at"]
+        writer = csv.DictWriter(output, fieldnames=headers)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(dict(row))
+        return (f"astratrade-strategy-{strategy_id or 'signals'}.csv", output.getvalue())
+
+    def due_strategies(self, at: datetime) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM strategy_instances WHERE status='running' AND next_run_at IS NOT NULL AND next_run_at <= ?", (iso(at),)).fetchall()
+        return [self._strategy_payload(row) for row in rows]
+
+    def run_strategy_once(self, user_id: str, strategy_id: str, price: Decimal, observed_at: Optional[str] = None, prices: tuple[Decimal, ...] = (), market_prices: Optional[dict[str, Decimal]] = None) -> dict[str, Any]:
+        from .strategies import MarketSnapshot, StrategyContext, build_strategy
+
+        strategy = self.strategy(user_id, strategy_id)
+        if not strategy:
+            raise ValueError("strategy not found")
+        observed = observed_at or strategy.get("next_run_at") or iso(now())
+        execution_key = f"{user_id}:{strategy_id}:{strategy['current_version']}:{observed}"
+        existing = self.connection.execute("SELECT status FROM execution_runs WHERE execution_key=?", (execution_key,)).fetchone()
+        if existing:
+            return {"status": "duplicate", "execution_key": execution_key}
+        implementation = build_strategy(strategy["strategy_type"], strategy["config"])
+        history_rows = self.connection.execute("SELECT price FROM market_snapshots WHERE user_id=? AND instrument='BTC-USDT' AND valid=1 ORDER BY observed_at", (user_id,)).fetchall()
+        history = tuple(Decimal(row["price"]) for row in history_rows if Decimal(row["price"]) > 0)
+        price_history = prices or history + (price,)
+        previous_price = price_history[-2] if len(price_history) > 1 else None
+        supplied_prices = market_prices or {str(item["instrument"]): Decimal(str(item["price"])) for item in strategy["config"].get("market_prices", ()) if isinstance(item, dict) and item.get("price") is not None}
+        allocations = tuple({**item, "price": str(supplied_prices[item["instrument"]])} for item in strategy["config"].get("allocations", ()) if isinstance(item, dict) and item.get("instrument") in supplied_prices)
+        instrument_prices = {"BTC-USDT": price}
+        instrument_prices.update({str(item["instrument"]): Decimal(str(item["price"])) for item in allocations if isinstance(item, dict) and item.get("price") is not None})
+        cooldown_hours = Decimal(str(strategy["config"].get("cooldown_hours", 0) or 0))
+        last_run = parse(strategy.get("last_run_at"))
+        cooldown_active = bool(last_run and cooldown_hours > 0 and now() < last_run + timedelta(hours=float(cooldown_hours)))
+        snapshot_id = f"market:{user_id}:{strategy_id}:{strategy['current_version']}:{observed}"
+        created = iso(now())
+        self.connection.execute("INSERT OR IGNORE INTO market_snapshots(snapshot_id,user_id,instrument,price,observed_at,source,expires_at,valid,created_at) VALUES (?,?,?,?,?,?,?,?,?)", (snapshot_id, user_id, "BTC-USDT", str(price), observed, "public_okx", iso(parse(observed) + timedelta(minutes=5)) if parse(observed) else None, 1 if price > 0 else 0, created))
+        context = StrategyContext(user_id, strategy_id, strategy["current_version"], MarketSnapshot("BTC-USDT", price, observed, snapshot_id), price_history, previous_price, allocations, cooldown_active)
+        signals = implementation.evaluate(context)
+        started = iso(now())
+        interval = timedelta(days=7 if strategy["config"].get("frequency") == "weekly" else 1)
+        with self.connection:
+            inserted = self.connection.execute("INSERT OR IGNORE INTO execution_runs(execution_key,strategy_id,user_id,strategy_version,status,started_at) VALUES (?,?,?,?,?,?)", (execution_key, strategy_id, user_id, strategy["current_version"], "running", started))
+            if inserted.rowcount == 0:
+                return {"status": "duplicate", "execution_key": execution_key}
+            results: list[dict[str, Any]] = []
+            for signal in signals:
+                signal_status = "skipped"
+                result: dict[str, Any] = {"signal_id": signal.signal_id, "action": signal.action, "reason": signal.reason, "status": signal_status}
+                self.connection.execute("INSERT INTO strategy_signals VALUES (?,?,?,?,?,?,?,?,?,?,?)", (signal.signal_id, strategy_id, user_id, signal.strategy_version, signal.instrument, signal.action, str(signal.requested_notional), signal.reason, signal.market_snapshot_id, signal_status, started))
+                if signal.action in {"buy", "sell"} and signal.requested_notional > 0:
+                    result = self._fill_strategy_signal(user_id, signal, instrument_prices.get(signal.instrument, price), execution_key)
+                    self.connection.execute("UPDATE strategy_signals SET status=? WHERE signal_id=?", (result["status"], signal.signal_id))
+                    self._record_risk_decision(user_id, signal.signal_id, result["status"] != "risk_blocked", result["reason"], signal.requested_notional, result.get("actual"))
+                else:
+                    self._record_risk_decision(user_id, signal.signal_id, True, "signal_action", signal.requested_notional, None)
+                    if signal.reason == "grid_out_of_range":
+                        self.notify(user_id, "strategy_paused_out_of_range", "网格策略已暂停", "当前价格超出网格区间，本次未生成订单。", "strategy", strategy_id, f"grid_out_of_range:{execution_key}")
+                results.append(result)
+            final_status = "filled" if any(item["status"] == "filled" for item in results) else ("risk_blocked" if any(item["status"] == "risk_blocked" for item in results) else "skipped")
+            finished = iso(now())
+            self.connection.execute("UPDATE execution_runs SET status=?, finished_at=? WHERE execution_key=?", (final_status, finished, execution_key))
+            self._record_strategy_performance_snapshot(user_id, strategy_id, price, execution_key, finished, instrument_prices)
+            self.connection.execute("UPDATE strategy_instances SET last_run_at=?, next_run_at=?, updated_at=? WHERE user_id=? AND strategy_id=?", (finished, iso(now() + interval), finished, user_id, strategy_id))
+        return {"status": final_status, "execution_key": execution_key, "signals": results}
+
+    def _record_risk_decision(self, user_id: str, signal_id: str, allowed: bool, reason: str, threshold: Any, actual: Any) -> None:
+        self.connection.execute("INSERT INTO risk_decisions(decision_id,signal_id,user_id,allowed,rule,threshold,actual,reason,created_at) VALUES (?,?,?,?,?,?,?,?,?)", ("risk_" + secrets.token_urlsafe(10), signal_id, user_id, 1 if allowed else 0, "strategy_simulation_guard", str(threshold) if threshold is not None else None, str(actual) if actual is not None else None, reason, iso(now())))
+
+    def _record_strategy_performance_snapshot(self, user_id: str, strategy_id: str, price: Decimal, execution_key: str, created_at: str, market_prices: Optional[dict[str, Decimal]] = None) -> None:
+        account = self.connection.execute("SELECT cash_usdt, btc, initial_cash_usdt FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()
+        if not account:
+            return
+        prices = market_prices or {"BTC-USDT": price}
+        positions = self.connection.execute("SELECT instrument, quantity FROM sim_positions WHERE user_id=?", (user_id,)).fetchall()
+        equity = Decimal(account["cash_usdt"])
+        for position in positions:
+            instrument_price = prices.get(str(position["instrument"]))
+            if instrument_price is not None:
+                equity += Decimal(position["quantity"]) * instrument_price
+        pnl = equity - Decimal(account["initial_cash_usdt"])
+        benchmark_price = prices.get("BTC-USDT", price)
+        self.connection.execute("INSERT OR IGNORE INTO strategy_performance_snapshots(snapshot_id,strategy_id,user_id,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (f"strategy-performance:{execution_key}", strategy_id, user_id, str(benchmark_price), str(equity), str(pnl), created_at))
+
+    def _fill_strategy_signal(self, user_id: str, signal: Any, price: Decimal, execution_key: str) -> dict[str, Any]:
+        if price <= 0:
+            self.audit(user_id, "risk_blocked", {"reason": "invalid_market_price", "instrument": signal.instrument, "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
+            self.notify(user_id, "risk_blocked", "策略执行被拦截", f"{signal.instrument} 行情无效，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
+            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "invalid_market_price", "status": "risk_blocked"}
+        account = self.connection.execute("SELECT * FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()
+        if not account:
+            self.notify(user_id, "risk_blocked", "策略执行被拦截", "模拟账户不存在，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
+            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "simulation_account_missing", "status": "risk_blocked"}
+        notional = signal.requested_notional
+        fee = (notional * Decimal("0.001")).quantize(Decimal("0.00000001"))
+        quantity = (notional / price).quantize(Decimal("0.00000001"))
+        cash = Decimal(account["cash_usdt"])
+        position = self.connection.execute("SELECT quantity FROM sim_positions WHERE user_id=? AND instrument=?", (user_id, signal.instrument)).fetchone()
+        holdings = Decimal(position["quantity"]) if position else Decimal("0")
+        if signal.action == "buy" and cash < notional + fee:
+            self.audit(user_id, "risk_blocked", {"reason": "insufficient_cash_or_invalid_price", "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
+            self.notify(user_id, "risk_blocked", "策略执行被拦截", "可用模拟余额不足，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
+            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "insufficient_cash_or_invalid_price", "status": "risk_blocked"}
+        if signal.action == "sell" and holdings < quantity:
+            self.audit(user_id, "risk_blocked", {"reason": "insufficient_position", "instrument": signal.instrument, "strategy_id": signal.strategy_id, "signal_id": signal.signal_id})
+            self.notify(user_id, "risk_blocked", "策略执行被拦截", f"模拟 {signal.instrument} 持仓不足，未生成订单。", "strategy", signal.strategy_id, f"risk:{execution_key}:{signal.signal_id}")
+            return {"signal_id": signal.signal_id, "action": signal.action, "reason": "insufficient_position", "status": "risk_blocked"}
+
+        order_id = "sim_" + secrets.token_urlsafe(10)
+        created = iso(now())
+        next_cash = cash - notional - fee if signal.action == "buy" else cash + notional - fee
+        next_holdings = holdings + quantity if signal.action == "buy" else holdings - quantity
+        next_btc = next_holdings if signal.instrument == "BTC-USDT" else Decimal(account["btc"])
+        self.connection.execute("UPDATE sim_accounts SET cash_usdt=?, btc=?, updated_at=? WHERE user_id=?", (str(next_cash), str(next_btc), created, user_id))
+        self.connection.execute("INSERT INTO sim_positions(user_id,instrument,quantity,updated_at) VALUES (?,?,?,?) ON CONFLICT(user_id,instrument) DO UPDATE SET quantity=excluded.quantity, updated_at=excluded.updated_at", (user_id, signal.instrument, str(next_holdings), created))
+        self.connection.execute("INSERT INTO sim_orders VALUES (?,?,?,?,?,?,?,?,?,?,?)", (order_id, f"{execution_key}:{signal.signal_id}", user_id, signal.instrument, signal.action, str(quantity), str(price), str(notional), str(fee), "filled", created))
+        if signal.instrument == "BTC-USDT":
+            equity = next_cash + next_btc * price
+            self.connection.execute("INSERT INTO sim_snapshots(user_id,cash_usdt,btc,price,equity_usdt,pnl_usdt,created_at) VALUES (?,?,?,?,?,?,?)", (user_id, str(next_cash), str(next_btc), str(price), str(equity), str(equity - Decimal(account["initial_cash_usdt"])), created))
+        self.audit(user_id, "strategy_order_filled", {"order_id": order_id, "strategy_id": signal.strategy_id, "strategy_version": signal.strategy_version, "signal_id": signal.signal_id, "reason": signal.reason, "fee": str(fee)})
+        self.notify(user_id, "order_filled", "策略模拟订单已成交", f"{signal.instrument} {signal.action} {quantity}，手续费 {fee} USDT。", "order", order_id, f"strategy-order:{order_id}")
+        return {"signal_id": signal.signal_id, "order_id": order_id, "action": signal.action, "reason": signal.reason, "status": "filled", "fee_usdt": str(fee)}
+
+    def record_strategy_market_failure(self, user_id: str, strategy_id: str) -> dict[str, str]:
+        scheduled = self.strategy(user_id, strategy_id)
+        if not scheduled:
+            raise ValueError("strategy not found")
+        interval = timedelta(days=7 if scheduled["config"].get("frequency") == "weekly" else 1)
+        current = now()
+        self.audit(user_id, "market_price_stale", {"instrument": "BTC-USDT", "strategy_id": strategy_id, "failure_category": "market_price_unavailable"})
+        self.notify(user_id, "market_price_stale", "策略行情暂不可用", "本次策略执行已跳过，未扣除模拟余额。", "strategy", strategy_id, f"strategy_market_price:{strategy_id}:{scheduled.get('next_run_at') or iso(current)}")
+        self.connection.execute("UPDATE strategy_instances SET last_run_at=?, next_run_at=?, updated_at=? WHERE user_id=? AND strategy_id=?", (iso(current), iso(current + interval), iso(current), user_id, strategy_id))
+        return {"status": "risk_blocked", "reason": "stale_market_price"}
+
     def analytics(self, user_id: str, price: Decimal) -> dict[str, Any]:
         account = self.connection.execute("SELECT * FROM sim_accounts WHERE user_id=?", (user_id,)).fetchone()
         if not account:
@@ -380,11 +792,13 @@ class ConsoleStore:
     def admin_overview(self) -> dict[str, Any]:
         users = self.connection.execute("SELECT COUNT(*) AS total FROM console_users").fetchone()["total"]
         active_agents = self.connection.execute("SELECT COUNT(*) AS total FROM agent_configs WHERE status='running'").fetchone()["total"]
+        active_strategies = self.connection.execute("SELECT COUNT(*) AS total FROM strategy_instances WHERE status='running'").fetchone()["total"]
         executions = self.connection.execute("SELECT COUNT(*) AS total FROM sim_orders").fetchone()["total"]
         filled = self.connection.execute("SELECT COUNT(*) AS total FROM sim_orders WHERE status='filled'").fetchone()["total"]
         risks = self.connection.execute("SELECT COUNT(*) AS total FROM console_audit WHERE event_type='risk_blocked'").fetchone()["total"]
         market_failures = self.connection.execute("SELECT COUNT(*) AS total FROM console_audit WHERE event_type='market_price_stale'").fetchone()["total"]
-        return {"user_count": users, "active_agent_count": active_agents, "execution_count": executions, "filled_order_count": filled, "risk_block_count": risks, "market_price_failure_count": market_failures}
+        strategy_runs = self.connection.execute("SELECT COUNT(*) AS total FROM execution_runs").fetchone()["total"]
+        return {"user_count": users, "active_agent_count": active_agents, "active_strategy_count": active_strategies, "execution_count": executions, "filled_order_count": filled, "risk_block_count": risks, "market_price_failure_count": market_failures, "strategy_run_count": strategy_runs}
 
     def export_csv(self, user_id: str, export_type: str) -> tuple[str, str]:
         if export_type == "orders":
