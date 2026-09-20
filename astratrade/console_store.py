@@ -383,7 +383,8 @@ class ConsoleStore:
         executions = self.connection.execute("SELECT COUNT(*) AS total FROM sim_orders").fetchone()["total"]
         filled = self.connection.execute("SELECT COUNT(*) AS total FROM sim_orders WHERE status='filled'").fetchone()["total"]
         risks = self.connection.execute("SELECT COUNT(*) AS total FROM console_audit WHERE event_type='risk_blocked'").fetchone()["total"]
-        return {"user_count": users, "active_agent_count": active_agents, "execution_count": executions, "filled_order_count": filled, "risk_block_count": risks, "market_price_failure_count": 0}
+        market_failures = self.connection.execute("SELECT COUNT(*) AS total FROM console_audit WHERE event_type='market_price_stale'").fetchone()["total"]
+        return {"user_count": users, "active_agent_count": active_agents, "execution_count": executions, "filled_order_count": filled, "risk_block_count": risks, "market_price_failure_count": market_failures}
 
     def export_csv(self, user_id: str, export_type: str) -> tuple[str, str]:
         if export_type == "orders":
