@@ -326,6 +326,10 @@ class ConsoleTests(unittest.TestCase):
         columns = {row[1] for row in connection.execute("PRAGMA table_info(risk_decisions)")}
         self.assertTrue({"decision_id", "user_id", "rule", "threshold", "actual", "reason"}.issubset(columns))
         self.assertEqual(tuple(connection.execute("SELECT signal_id, allowed FROM risk_decisions").fetchone()), ("legacy-signal", 1))
+        store = ConsoleStore(connection)
+        store._record_risk_decision("user-e2e", "new-signal", True, "signal_action", "20", None)
+        row = connection.execute("SELECT user_id, allowed, reasons, estimated_notional FROM risk_decisions WHERE signal_id='new-signal'").fetchone()
+        self.assertEqual(tuple(row), ("user-e2e", 1, "signal_action", "20"))
         connection.close()
 
 
